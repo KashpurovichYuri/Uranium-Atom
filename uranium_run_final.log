@@ -1,0 +1,1405 @@
+#INFO: **** input file is /home/kashpur/pylibgrpp/test/uranium/test_uranium_atom_32e.py ****
+"""
+U atom (32e-GRECP), CAS(6,13) quintet (5f3 6d1 7s2).
+
+Pipeline (main = four calls; all functions defined above it):
+  stage1_scf  — SCF variants from STAGE1 (strategy mini-language)
+  stage2_cas  — declarative STAGE2: CAS pick from the seed row -> CASCI
+                pre-flight row -> CASSCF + NOs + configuration histogram
+  stage3_scf  — SCF experiments from STAGE3: seeded (CASSCF NOs, earlier
+                rows' dm) or cold; not necessarily restarts
+  report      — final table (text + results.md)
+
+Strategy mini-language (per variant, stages tried in order until converged):
+  'DIIS'  plain SCF; DIIS extrapolation from cycle DIIS_START
+  'SOSCF' second-order Newton/CIAH from the current point; as FIRST stage
+          it is the tool of choice when the guess is already in the
+          trust region (e.g. CASSCF natural orbitals)
+  'SMEAR' gaussian fractional occupations (smooth SCF map; regularizes the
+          frontier flip-flopping; E/<S^2> of the smeared stage itself are
+          ensemble-like, not term-resolved)
+  'SMEARFS' as SMEAR with fix_spin=True: spin-separated chemical potentials
+            (meaningful for the open shell; UHF/UKS class only — PySCF has
+            no ROHF smearing, an ROHF object is recast to RHF)
+  'CLEAN' integer restart from the current (possibly fractional) dm
+
+Session-verified PySCF 2.13.1 facts:
+  * pyscf.scf.smearing.smearing(mf, sigma=...)  (addons.frac_occ: neither
+    sigma nor gap in this version);
+  * FCI strings: bit j of the integer = active orbital j; bin() is MSB-first
+    -> RIGHTMOST char is orbital 0. CAS column order = sort_mo feed order.
+  * mcscf chkfile: data live under the 'mcscf' key (dump_mcscf); the CI
+    vector is written ('ci_vector') only when mc.chk_ci = True.
+  * smearing an ROHF object recasts it to the RHF class (no ROHF smearing
+    in PySCF); therefore SMEAR/SMEARFS/CLEAN rows are never warm-seeded —
+    the tiny verify budget cannot re-flag convergence while the mu
+    re-optimization reshuffles the near-degenerate fractional frontier.
+Enhancement points (postponed): NOON boundary audit (7p); stability tests;
+CASSCF multistart; term-resolved (CSF) weight analysis.
+"""
+import os, sys, time, inspect
+from collections import defaultdict
+from types import SimpleNamespace
+import numpy as np
+from scipy.linalg import eigh as _sc_eigh
+from pyscf import gto, scf, dft, mcscf, fci
+from pyscf.mcscf import addons
+from pyscf.scf.smearing import smearing as _smear_fn   # verified: takes sigma=
+from pyscf.lib import chkfile as lib_chk
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+import libgrpp
+import libgrpp4pyscf
+
+# ============================ CONFIG ===================================
+ATOM  = '''U    0.0    0.0    0.0'''
+BASIS = {
+        'U': gto.parse('''
+    U S
+        3.09793695E+01  1.0
+    U S
+        1.93389862E+01  1.0
+    U S
+        1.19091789E+01  1.0
+    U S
+        7.28108692E+00  1.0
+    U S
+        4.52381555E+00  1.0
+    U S
+        2.69147870E+00  1.0
+    U S
+        1.62933419E+00  1.0
+    U S
+        1.02810670E+00  1.0
+    U S
+        6.05884393E-01  1.0
+    U S
+        3.55646976E-01  1.0
+    U S
+        2.01800187E-01  1.0
+    U S
+        1.24813560E-01  1.0
+    U S
+        6.38361554E-02  1.0
+    U S
+        3.29899773E-02  1.0
+    U S
+        1.68638039E-02  1.0
+    U P
+        4.17040704E+01  1.0
+    U P
+        2.47028799E+01  1.0
+    U P
+        1.44963977E+01  1.0
+    U P
+        8.57586995E+00  1.0
+    U P
+        4.98086081E+00  1.0
+    U P
+        2.84040828E+00  1.0
+    U P
+        1.59903715E+00  1.0
+    U P
+        8.64765972E-01  1.0
+    U P
+        4.57242055E-01  1.0
+    U P
+        2.38933519E-01  1.0
+    U P
+        1.18792999E-01  1.0
+    U P
+        5.70066185E-02  1.0
+    U P
+        2.69891792E-02  1.0
+    U P
+        1.27490309E-02  1.0
+    U D
+        1.38063993E+01  1.0
+    U D
+        8.06231666E+00  1.0
+    U D
+        4.66375400E+00  1.0
+    U D
+        2.63565039E+00  1.0
+    U D
+        1.45796002E+00  1.0
+    U D
+        7.74812159E-01  1.0
+    U D
+        3.72484724E-01  1.0
+    U D
+        1.71955342E-01  1.0
+    U D
+        7.61336090E-02  1.0
+    U D
+        3.20319168E-02  1.0
+    U F
+        3.68446566E+01  1.0
+    U F
+        1.98480492E+01  1.0
+    U F
+        1.07216853E+01  1.0
+    U F
+        5.70450122E+00  1.0
+    U F
+        2.92433437E+00  1.0
+    U F
+        1.43960404E+00  1.0
+    U F
+        6.73859301E-01  1.0
+    U F
+        2.94349701E-01  1.0
+    U F
+        1.13239850E-01  1.0
+    U F
+        5.45732520E-02  1.0
+    ''')
+}
+ECP = {
+        'U': libgrpp4pyscf.parse_grpp('''
+    U32     ************************
+            32e-GRECP for U    by N.S.Mosyagin from 14.12.05                                
+            5spd- and 6sp-pseudospinors from the 5f^3 6d^1 7s^0.5 7p^0.5 state 
+             32.00000000    1    3    1    1    1    1    5    5    1
+       11    2                          5S1/2                    6S1/2 
+       29.15213192458267       0.3892130302999023       0.8820465766767023E-001
+       22.56274029826339       -1.083748184436564      -0.3086564941149703     
+       14.84447587432801        1.781625032180986       0.9181156488181954     
+       9.645801059532914      -0.9854978312448497       -1.729616675755459     
+       8.482415442696070       -1.274304374087758       0.4092294750651286     
+       5.255349638915979       0.6815730777883831       0.3122030330938722     
+       2.332900827178482        1.051329975620041        1.175342530499192     
+       1.219936986959094       0.2134368158251923       0.7455058722391363E-001
+      0.5929086195484954       0.7444179777265227E-002 -0.8683061615545491     
+      0.3017887646611004      -0.1559067854174038E-003 -0.5270320674045721     
+      0.1395336706295047       0.9021600395256829E-004 -0.4497506156500129E-001
+       12    4                          5P1/2                    5P3/2                    6P1/2                    6P3/2 
+       35.10933615157832      -0.1707755782130409E-001  0.1505236816664149      -0.2681823269072801E-001  0.1416434858690659E-001
+       28.84291321563328      -0.2102546962232450E-001 -0.4646758956916344       0.6384195601051408E-001 -0.5644339519905654E-001
+       20.86383477095284       0.2496261937574682       0.7894657478698838      -0.5773804767648835E-001  0.1330865849194820     
+       14.10254487950059      -0.6555955386660668       -1.025932779944547      -0.6354699451416718E-001 -0.2739158589451064     
+       9.288244858015013        1.306305857040466        1.073873921395526       0.5098337489394150       0.4683565270185809     
+       6.721649552278908      -0.7709756448547127      -0.2656463499750454      -0.3974809175784501      -0.1590404630689468     
+       2.883104696591459      -0.7139558622601968      -0.6790688127229189      -0.5434765792065456      -0.4533208228310942     
+       1.541141867656880      -0.2777664100579028      -0.4386322154384324      -0.8137238235265629E-001 -0.2901340749369136     
+      0.7700037446753281      -0.2660929218570566E-001 -0.6641037351461508E-001  0.5033767925454345       0.3195327543994370     
+      0.3975724815778846      -0.4020262764046741E-003 -0.1182989297423446E-002  0.5344259830115492       0.5830078583560500     
+      0.2030133288102335      -0.1710675000389824E-003 -0.5426863998303108E-003  0.1704220425723886       0.3160841770134976     
+      0.9490228630676976E-001  0.3825396000927381E-004  0.1061567457164844E-003  0.1063042602352402E-001  0.3918646992872341E-001
+        5    2                          5D3/2                    5D5/2 
+       11.26304309389773      -0.6401234850979690E-001 -0.5327286103768295E-001
+       5.641422968737709       0.1972019582485448E-001 -0.2267986002988396E-001
+       3.109129078979017       0.5738012257157131       0.5558942121394146     
+       1.440417508751449       0.4442699878519954       0.4754922400713096     
+      0.6121891786662117       0.8454167087406664E-001  0.1029015284972698     
+       30    2    0 0.00 30.0 0.00 30.0  7S-AREP                                            5S1/2                    6S1/2                          
+     0  0.2317014268741285        10.00000000000000        0.000000000000000        0.000000000000000        0.000000000000000           
+     1   242.9179564142772        46.11674258885296        0.000000000000000        0.000000000000000        0.000000000000000           
+     1   162.5245117725116       -173.7542231476400        0.000000000000000        0.000000000000000        0.000000000000000           
+     1   109.5811896748054        493.8218589747339        0.000000000000000        0.000000000000000        0.000000000000000           
+     1   72.99200989088527       -827.2746944763821        0.000000000000000        0.000000000000000        0.000000000000000           
+     1   46.29879120425043        502.7935917757445        0.000000000000000        0.000000000000000        0.000000000000000           
+     2   56.20446814945348        3762.479536922336        0.000000000000000        0.000000000000000        0.000000000000000           
+     2   39.03246086970426       -8139.224143504980        0.000000000000000        0.000000000000000        0.000000000000000           
+     2   27.10314958862108        8135.642373621093        0.000000000000000        0.000000000000000        0.000000000000000           
+     2   18.59511711210433       -6569.584218738812        0.000000000000000        0.000000000000000        0.000000000000000           
+     2   12.60710893702717        4267.325782201637        0.000000000000000        0.000000000000000        0.000000000000000           
+     2   8.526947878019678       -2016.310635791310        0.000000000000000        0.000000000000000        0.000000000000000           
+     2   5.793034469369744        862.7465992210173        0.000000000000000        0.000000000000000        0.000000000000000           
+     2   3.934984519097092       -400.0420116141454        0.000000000000000        0.000000000000000        0.000000000000000           
+     2   2.658392335668391        150.2081101762968        0.000000000000000        0.000000000000000        0.000000000000000           
+     2   1.788492782986496       -71.26475467581480        0.000000000000000        0.000000000000000        0.000000000000000           
+     2   1.187818827820123        18.87876566602031        0.000000000000000        0.000000000000000        0.000000000000000           
+     2  0.7872486852090064       -11.49617071779201        0.000000000000000        0.000000000000000        0.000000000000000           
+     2  0.5067914638051081       0.2949813229133569        0.000000000000000        0.000000000000000        0.000000000000000           
+     2  0.3320636860499803       -2.227145207429960        0.000000000000000        0.000000000000000        0.000000000000000           
+     2  0.2133601212283606      -0.1339427383488657        0.000000000000000        0.000000000000000        0.000000000000000           
+     2   29.91532251504295        0.000000000000000        0.000000000000000       -1094.540380429567       -82.15656117829118           
+     2   21.55800111609701        0.000000000000000        0.000000000000000        2580.681958343099        172.0954645702163           
+     2   15.43808645185192        0.000000000000000        0.000000000000000       -2653.068717584802       -156.1198135223662           
+     2   10.52187670701760        0.000000000000000        0.000000000000000        1344.248046940398        58.88635187992008           
+     2   6.754151297511496        0.000000000000000        0.000000000000000       -452.4806739443238       -8.875489860013625           
+     2   4.340698790188259        0.000000000000000        0.000000000000000        147.7084450559241      -0.1127606127019846           
+     2   2.884485940470248        0.000000000000000        0.000000000000000       -41.55250415838098       0.6505493547772339           
+     2   1.923822068682500        0.000000000000000        0.000000000000000        6.662986046210377      -0.1759797231196426           
+     2  0.1332703312510299        0.000000000000000        0.000000000000000      -0.1531709383081229E-001  0.2773465421040718E-002      
+       29    4    0 0 30 0 30 0 30 0 30  7P-AREP                  7P-ESOP                   5P1/2                    5P3/2                    6P1/2                    6P3/2         
+     0  0.1108944958616423        9.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     1   91.30999398009141        39.43091155859992        1.930258869055901        0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     2   231.9471944082305       -130.5646063454102        51.15140238042120        0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     2   78.89329450014930       -435.0767791040475       -359.1740094539089        0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     2   52.41186969049220        1120.493551630994        864.6736476292266        0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     2   34.10475831644786       -1408.450227843489       -1101.638617935573        0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     2   21.14799459689021        2252.035967256824        1089.513030622157        0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     2   14.32141410028800       -2905.159572512028       -611.7160388698682        0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     2   10.37715993218774        2312.957559604401       -174.7511580013867        0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     2   7.339074963666151       -798.8781181575230        387.2561679654767        0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     2   4.572058172104139        136.9515924179399       -149.4120037376143        0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     2   2.781358228231780       -56.70086567452772        50.54455892852867        0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     2   1.684431365497172        9.614041176947085       -16.78361877448787        0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     2   1.090478164140486       -11.84551160141148        4.506396873347090        0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     2  0.4263912578748079       -3.014060937410117      -0.6046488991076755        0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     2  0.2501560815003279      -0.7627218157722118       0.3533441025050941        0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     2  0.1546247515066650      -0.8519542407538329      -0.1313676512794817        0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     2  0.7132156441438754E-001 -0.2575978639077353E-001  0.2835840967417408E-001   0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     2  0.3953736471272211E-001  0.4336813593023247E-002 -0.1109911880950225E-001   0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     2  0.2234894684119505E-001 -0.8300072330660706E-003  0.3045631996457451E-002   0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     2  0.1274999593097006E-001  0.1034679546362060E-003 -0.4314261260358685E-003   0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     1   14.36253347635924        0.000000000000000        0.000000000000000        187.5841343984885        118.9776764008286        8.535172547387873        10.08022074433214     
+     1   10.21916634442534        0.000000000000000        0.000000000000000       -380.4010505233108       -192.7111977038049       -16.40881039588677       -17.57673288327495     
+     1   6.892114956228067        0.000000000000000        0.000000000000000        294.6629866225379        79.15711882553073        9.822351377646829        10.05522460650142     
+     1   3.944675114142233        0.000000000000000        0.000000000000000       -105.4996404539310       -1.773930339214458       -2.093920742517512       -2.362885361253753     
+     2   2.740759655045481        0.000000000000000        0.000000000000000        69.26818263022125       -13.92905946144987       0.4139693545956010       0.9475847973257341     
+     2   1.774798260307428        0.000000000000000        0.000000000000000       -19.72041175821925        6.916758502129223       0.5741639597204506E-001 -0.1350973669854305     
+     2  0.7852966154003103        0.000000000000000        0.000000000000000        2.027353988360035      -0.9046380968767915      -0.2106498832209941E-001 -0.3632947134300505E-002
+     2  0.3561956792676799        0.000000000000000        0.000000000000000      -0.2680715180603090       0.1290109424729193       0.4347921092257834E-002  0.2089024716426303E-002
+       17    2    0 0.00 30.0 0.00 30.0  6D-AREP                  6D-ESOP                   5D3/2                    5D5/2 
+     0  0.2070300297624345        7.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     1   47.02977455813188        21.41728289187231       0.1243472901676845        0.000000000000000        0.000000000000000     
+     1   13.17414908396318        82.59465592231041        2.561273387131035        0.000000000000000        0.000000000000000     
+     1   9.416625389969232       -65.21423256180505       -2.186861272763748        0.000000000000000        0.000000000000000     
+     2   5.696403263371752        246.1504948976392       -7.630334648349915        0.000000000000000        0.000000000000000     
+     2   4.100924963821768       -216.9610434772588        19.18537232686124        0.000000000000000        0.000000000000000     
+     2   2.839578333037860        85.14127259738486       -9.581998065820954        0.000000000000000        0.000000000000000     
+     2   1.967778260176243       -34.25996808477208        1.989757985539800        0.000000000000000        0.000000000000000     
+     2  0.6161014542450013       -4.062739567645936      -0.3080035991609553E-001   0.000000000000000        0.000000000000000     
+     2  0.2724940847236936       -1.206964323524060       0.3895579752611927E-002   0.000000000000000        0.000000000000000     
+     2  0.7347608472042746E-001 -0.1115140848839140E-002 -0.1467464583119150E-003   0.000000000000000        0.000000000000000     
+     2   18.93834393744167        0.000000000000000        0.000000000000000       -164.5761545083678       -119.4593521694341     
+     2   13.54497466828996        0.000000000000000        0.000000000000000        357.8991740756574        250.3625457913340     
+     2   9.645214264771086        0.000000000000000        0.000000000000000       -334.5167990767964       -221.3330896240109     
+     2   6.758584995753906        0.000000000000000        0.000000000000000        157.2909374811657        92.56544682439791     
+     2   4.813628913729413        0.000000000000000        0.000000000000000       -41.85216250144985       -21.35608786212828     
+     2   3.440018636116691        0.000000000000000        0.000000000000000        5.470036514910436        2.832154206224443     
+        9    0    0                      5F-AREP                  5F-ESOP
+     0   43.30082314075000        4.000000000000000        0.000000000000000     
+     1   24.72205802454236        86.25446237938201      -0.5296471779355763     
+     1   13.35100063135517       -46.18837754801446       0.5553911373967928     
+     2   10.63771884070873        331.7471942388690        2.743287842664728     
+     2   7.247931526310381       -132.9225343905385       -6.329810468671695     
+     2   3.873957923828072        47.53416688051445        3.644805091856639     
+     2   2.178937006211554       -12.28463466483176      -0.8894950470969931     
+     2   1.469951720761049        3.654142564137235       0.2163433863666313     
+     2   1.003283520090549      -0.4392882501988922      -0.1530470893984948E-001
+       17    0    0                      5G-AREP                  5G-ESOP
+     1   360.6315501468202       -28.64742114130145        1.921463247461583     
+     2   2065.131979133357        97.22299298390718       -17.01080235000500     
+     2   508.2356837089516        396.1667080905177       -1.442833464241581     
+     2   342.5407930811340       -172.7361221647992       -15.75024125419902     
+     2   76.27341270893233       -501.7576344637667        65.63090097276836     
+     2   54.40912754834765        348.6201928187299       -46.08718268858197     
+     2   38.58951644405050       -242.6459139898578        18.04360408132586     
+     2   16.14820080555046       -49.91970370243537      -0.5513756992339177     
+     2   7.024134652169744       -5.163954898364588       0.1630119149669745     
+     2   2.516814643894863      -0.1231613844645565      -0.5057669293439599E-001
+     2   1.572906717635522       0.2992202448477607E-001  0.3836094172595616E-001
+     2  0.9634371755100256      -0.5796070977516611E-002 -0.1126442721407249E-001
+     2  0.5847142804181048       0.3819469723890031E-003  0.2492629275812379E-002
+     2  0.1164512516808590      -0.3715303401337178E-004  0.4197029753519996E-004
+     2  0.2938490053984713E-001 -0.2206818613484872E-005  0.2807930170704953E-005
+     2  0.8511875915625303E-002 -0.6057414003066741E-006  0.3315355957732399E-007
+     2  0.1805372311436570E-002  0.2155264331858628E-007  0.3955860493337014E-007
+    ''')
+}
+UNIT, CHARGE, SPIN = 'B', 0, 4    # quintet: 2*Sz = 4
+NELECAS    = (5, 1)               # active electrons (na, nb)
+NCAS       = 13
+CAS_MANUAL = None                 # 1-based MO list to override pick_cas
+TARGET_CFG = {'s': 2.0, 'd': 1.0, 'f': 3.0}
+CFG_TOL, CFG_PRINT_TOL = 0.3, 0.05
+XC, SMEAR_SIGMA = 'pbe', 0.02
+CORE_MAP   = {0: 4, 1: 12, 2: 10} # closed shells subtracted: 5s6s / 5p6p / 5d
+WARM, WARM_MAX_SCF, WARM_MAX_MACRO = True, 3, 6
+MAX_DIIS, MAX_SOSCF, MAX_MACRO = 100, 50, 50
+DIIS_START, CONV_TOL = 1, 1e-9
+VERBOSE, SCF_VERBOSE = 4, 3
+CSF_CUTOFF, PRINT_CSF = 0.05, True
+HARTREE2EV = 27.211386245988
+
+STAGE1 = [
+    # (name, kind, strategy)   kind in {ROHF, UHF, UKS}
+    ('ROHF',           'ROHF', ('DIIS', 'SOSCF')),
+    ('ROHF-smear*',    'ROHF', ('SMEAR', 'CLEAN')),
+    ('UHF',            'UHF',  ('DIIS', 'SOSCF')),
+    ('UHF-smear*',     'UHF',  ('SMEAR', 'CLEAN')),
+    ('UKS-PBE',        'UKS',  ('DIIS', 'SOSCF')),
+    ('UKS-PBE-smear*', 'UKS',  ('SMEAR', 'CLEAN')),
+    ('UKS-PBE-smear-fs*', 'UKS', ('SMEARFS', 'CLEAN')),
+]
+STAGE2 = [
+    # (name, kind, seed, preflight)   kind: 'CASCI'|'CASSCF'; seed: slug of
+    # the STAGE1 row providing MOs (fail-fast if missing/unconverged);
+    # preflight: print NOONs and keep E as the relaxation metric
+    ('CASCI',  'CASCI',  'rohf', True),
+    ('CASSCF', 'CASSCF', 'rohf', False),
+]
+STAGE3 = [
+    # (name, kind, seed, strategy)   seed: None = cold start; 'casscf' =
+    # natural orbitals + NOON-ranked occ; or a slug of an earlier row
+    # (the seeded row must run EARLIER in this list)
+    ('UHF<-CAS',                'UHF', 'casscf',  ('DIIS', 'SOSCF')),
+    ('UKS-PBE<-CAS',            'UKS', 'casscf',  ('DIIS', 'SOSCF')),
+    ('UKS-PBE<-CAS-SOSCF',      'UKS', 'casscf',  ('SOSCF',)),   # Newton from iter 1
+    ('UKS-PBE<-UHF<-CAS',       'UKS', 'uhf_cas', ('DIIS', 'SOSCF')),
+    ('UKS-PBE<-UHF<-CAS-SOSCF', 'UKS', 'uhf_cas', ('SOSCF',)),   # Newton from iter 1
+]
+# =======================================================================
+
+
+# ---------------- convergence bookkeeping -------------------------------
+class CycleCounter:
+    """Per-iteration bookkeeping via mf.callback(envs): cycles spent, last
+    |dE|, last |grad| — the achieved precision behind the table's 'conv'
+    claim (loop exit alone hides stalls and oscillation). envs key names
+    differ across kernels (plain SCF: norm_g; mcscf fires the callback
+    twice per macro) -> known keys are tried, missing ones degrade to '—'.
+    mcscf envs carry 'imacro': the distinct-imacro count is the true macro
+    total ('N macro'); SCF kernels have no imacro -> plain cycle count."""
+    KEYS_E = ('e_tot', 'etot')
+    KEYS_G = ('norm_g', 'norm_gorb', 'grad_norm', 'gnorm')
+    def __init__(self):
+        self.n = 0; self.e_last = self.e_prev = None; self.g_last = None
+        self.macros = set()
+    def __call__(self, envs):
+        self.n += 1
+        im = envs.get('imacro')
+        if im is not None:
+            self.macros.add(int(im))
+        e = next((envs[k] for k in self.KEYS_E if k in envs), None)
+        if e is not None:
+            self.e_prev, self.e_last = self.e_last, float(e)
+        g = next((envs[k] for k in self.KEYS_G if k in envs), None)
+        if g is not None:
+            self.g_last = float(g)
+    @property
+    def prec(self):
+        # no '|' inside cells: pipes break markdown table columns
+        parts = []
+        if None not in (self.e_last, self.e_prev):
+            parts.append(f'dE {abs(self.e_last - self.e_prev):.1e}')
+        if self.g_last is not None:
+            parts.append(f'g {self.g_last:.1e}')
+        return ', '.join(parts) if parts else '—'
+    def summary(self):
+        if self.macros:
+            return f'{len(self.macros)} macro'
+        return f'{self.n} cyc' if self.n else None
+
+
+def _counted_kernel(mf, dm0=None):
+    """kernel() + callback counter + wall time -> (counter, seconds)."""
+    cc = CycleCounter(); mf.callback = cc
+    t0 = time.perf_counter()
+    mf.kernel(dm0)
+    return cc, time.perf_counter() - t0
+
+
+def _stage(label, cc):
+    s = cc.summary()
+    return f'{label} {s}' if s else label
+
+
+def smear_scf(mf, sigma):
+    """Gaussian fractional occupations, width sigma: smooths the SCF map and
+    regularizes the frontier flip-flopping that defeats integer DIIS."""
+    return _smear_fn(mf, sigma=sigma)
+
+
+def large_ci_cut(ci, ncas, nelecas, cut=CSF_CUTOFF):
+    """fci.addons.large_ci with the cutoff keyword located by signature."""
+    params = inspect.signature(fci.addons.large_ci).parameters
+    for kw in ('tol', 'lim', 'cutoff'):
+        if kw in params:
+            return fci.addons.large_ci(ci, ncas, nelecas, **{kw: cut})
+    return fci.addons.large_ci(ci, ncas, nelecas, cut)
+
+
+# ---------------- wavefunction / orbital diagnostics --------------------
+def frontier_gap(mf, occ_tol=0.9):
+    """HOMO->LUMO gap, eps_{N+1} - eps_N (N = #occ > occ_tol; per-spin list
+    for UHF/UKS). A tiny gap means an expanding SCF fixed-point map (DIIS
+    stalls) AND static correlation (the CAS is needed); printed per row in
+    the run log."""
+    try:
+        e, o = np.asarray(mf.mo_energy), np.asarray(mf.mo_occ)
+        if e.ndim == 2:
+            return [float(e[s][np.where(o[s] > occ_tol)[0].max() + 1]
+                          - e[s][np.where(o[s] > occ_tol)[0].max()])
+                    for s in range(e.shape[0])]
+        i = np.where(o > occ_tol)[0].max()
+        return float(e[i + 1] - e[i])
+    except Exception:
+        return None
+
+
+def fmt_gap(g):
+    if g is None:           return '-'
+    if isinstance(g, list): return '/'.join(f'{x:.1e}' for x in g)
+    return f'{g:.1e}'
+
+
+def fmt_cfg(cfg):
+    """{'s':2.0,'d':1.0,'f':3.0} -> 's^2.00 d^1.00 f^3.00'."""
+    return ' '.join(f'{l}^{n:.2f}' for l, n in cfg.items()) if cfg else '(none)'
+
+
+def config_matches(cfg):
+    """All TARGET_CFG components present and within CFG_TOL electrons."""
+    if not cfg:
+        return False
+    return all(l in cfg and abs(cfg[l] - n) <= CFG_TOL
+               for l, n in TARGET_CFG.items())
+
+
+def slug(name):
+    """Row name -> chkfile/seed tag: 'UKS-PBE<-CAS' -> 'uks_pbe_cas'.
+    '<' and '-' each map to '_', so duplicates are collapsed ('<-'' would
+    otherwise yield two); STAGE3 seed literals are these collapsed slugs."""
+    s = (name.lower().replace('<', '_').replace('-', '_')
+         .replace('*', '').replace(' ', '_'))
+    while '__' in s:
+        s = s.replace('__', '_')
+    return s
+
+
+# ---------------- system construction & population analysis --------------
+def ao_l_list(mol):
+    """Angular momentum l of every AO column (len = mol.nao).
+    Shell b = bas_nctr(b) contracted functions of momentum bas_angular(b),
+    each contributing 2l+1 (m = -l..l) columns; [l] is a one-element list,
+    list * int repeats it -> one l label per column. Example: 2 s-shells +
+    1 p-shell -> [0,0,1,1,1]."""
+    out = []
+    for b in range(mol.nbas):
+        l = mol.bas_angular(b)
+        out += [l] * (2*l + 1) * mol.bas_nctr(b)
+    return np.array(out)
+
+
+def l_weights(ctx, mo):
+    """Lowdin l-composition: w[l,i] = fraction of MO i's norm carried by AOs
+    of momentum l. Squared coefficients are taken in the symmetrically
+    orthogonalized AO frame (C' = S^(1/2) C, C'^T C' = I), so the partition
+    is exact as bookkeeping: w >= 0, sum_l w[l,i] = 1, and the electron
+    count sum_l n_l = N_elec holds by construction. For a single atom S is
+    block-diagonal in l, so the orthogonalization keeps l-blocks separate
+    and the l-attribution of each MO is unambiguous; the split among
+    functions of one l remains a statement about this basis (populations
+    are not observables). UHF spin blocks are handled in valence_config,
+    not here ((C_a + C_b)/2 is not S-orthonormal)."""
+    if mo is None:
+        raise RuntimeError('mo_coeff is None — SCF object was never run!')
+    mo = np.asarray(mo, dtype=float)
+    assert mo.ndim == 2, f'expect one (nao,nmo) matrix, got {mo.shape}'
+    assert mo.shape[0] == ctx.l_ao.size == ctx.S.shape[0]  # labeling == rows
+    s2, U = np.linalg.eigh(ctx.S)
+    Co = (U * np.sqrt(s2)) @ U.T @ mo
+    W = np.stack([(Co[ctx.l_ao == l]**2).sum(0)
+                  for l in range(int(ctx.l_ao.max()) + 1)])
+    assert np.allclose(W.sum(0), 1.0, atol=1e-8)   # partition of unity
+    return W
+
+
+def valence_config(ctx, occ, mo, etol=CFG_PRINT_TOL):
+    """Open-valence electrons per angular momentum,
+        n_l = sum_i n_i * w[l,i]  -  CORE_MAP[l]        (Lowdin populations)
+    with sum_l n_l = sum_i n_i = N_elec exactly (assert). n_i = occupations:
+    RHF/ROHF 2/1/0; UHF/UKS (2,nmo) with per-spin Lowdin weights then summed;
+    CASSCF: NOONs (only in the natural-orbital frame do occupations exist —
+    see stage2). The CASSCF result is the DENSITY's shell population, i.e.
+    an ensemble average over the CI determinants (hence soft values)."""
+    occ, mo = np.asarray(occ, dtype=float), np.asarray(mo, dtype=float)
+    if occ.ndim == 2:
+        assert mo.ndim == 3 and mo.shape[0] == occ.shape[0]
+        nel = sum(o @ l_weights(ctx, c).T for o, c in zip(occ, mo))
+    else:
+        assert mo.ndim == 2
+        nel = occ @ l_weights(ctx, mo).T
+    assert abs(nel.sum() - ctx.mol.nelectron) < 1e-6, \
+        f'{nel.sum()} != {ctx.mol.nelectron}'
+    tags = 'spdfgh'
+    raw = {tags[l]: round(float(n), 2) for l, n in enumerate(nel) if n > etol}
+    val = {tags[l]: round(float(n - CORE_MAP.get(l, 0)), 2)
+           for l, n in enumerate(nel) if n - CORE_MAP.get(l, 0) > etol}
+    print('  per-l raw:', raw, '\n  valence  :', val)
+    return val
+
+
+def build_system():
+    """Molecule + GRPP integrals + fixed analysis context (SimpleNamespace):
+    overlap S, per-column l labels, electron counts, table rows."""
+    mol = libgrpp4pyscf.GRPPMole()
+    mol.build(atom=ATOM, basis=BASIS, ecp=ECP, spin=SPIN, charge=CHARGE,
+              unit=UNIT, verbose=VERBOSE)
+    libgrpp4pyscf.compare_integrals_with_pyscf(mol, verbose=True, gradients=False)
+    l_ao = ao_l_list(mol)
+    assert not mol.cart and (l_ao == 3).sum() >= 7, 'need spherical f functions'
+    return SimpleNamespace(
+        mol=mol, S=mol.intor('int1e_ovlp'), l_ao=l_ao,
+        na=(mol.nelectron + SPIN)//2, nb=(mol.nelectron - SPIN)//2,
+        rows=[], mf_ref=None, mc=None, noon=None, natorb=None)
+
+
+# ---------------- SCF engine ---------------------------------------------
+def make_scf(ctx, kind, xc=None):
+    """Fresh mol-bound SCF object; kind in {ROHF, UHF, UKS}; quiet verbosity
+    (the final table carries the analysis, not the cycle log)."""
+    mf = {'ROHF': ctx.mol.ROHF, 'UHF': ctx.mol.UHF, 'UKS': ctx.mol.UKS}[kind]()
+    if xc:
+        mf.xc = xc
+    mf.verbose = SCF_VERBOSE
+    return mf
+
+
+def seed_from_chk(mf, tag):
+    """WARM: previous run's converged orbitals as the starting guess — a
+    guess, never truth; the short re-run certifies the stored solution
+    (a converged state re-converges in 1-2 cycles to the same E)."""
+    path = f'{tag}.chk'
+    if not (WARM and os.path.exists(path)):
+        return False, None
+    try:
+        mol_chk, rec = scf.chkfile.load_scf(path)
+        if (mol_chk.nao_nr() != mf.mol.nao_nr()
+                or mol_chk.nelectron != mf.mol.nelectron):
+            print(f'  [{tag}] chk belongs to a different system -> cold start')
+            return False, None
+        mf.mo_coeff, mf.mo_occ = rec['mo_coeff'], rec['mo_occ']
+        if rec.get('mo_energy') is not None:
+            mf.mo_energy = rec['mo_energy']
+        print(f'  [{tag}] warm seed (E_prev={rec["e_tot"]:.8f})')
+        return True, rec.get('e_tot')
+    except Exception as ex:
+        print(f'  [{tag}] chk seed failed ({ex}) -> cold start')
+        return False, None
+
+
+def run_scf(ctx, name, kind, strategy=('DIIS', 'SOSCF'), xc=None, dm0=None):
+    """One SCF variant via the strategy mini-language (see module docstring).
+    Warm seeding overrides the initial dm and shortens all budgets, and the
+    re-run doubles as a stationarity check (dE_vs_chk in the note) — except
+    SMEAR/SMEARFS/CLEAN strategies, which always run cold (module docstring
+    explains why)."""
+    if isinstance(strategy, str):   # missing comma: ('SOSCF') == 'SOSCF'
+        raise TypeError(f"strategy for '{name}' is a string, not a tuple of "
+                        f"stages — add the trailing comma: ({strategy!r},)")
+    tag = slug(name)
+    mf = make_scf(ctx, kind, xc)
+    # warm-verify does not suit smeared rows: the frontier holds near-
+    # degenerate fractional occupation pairs and the re-optimized chemical
+    # potential transiently breaks the electron count, so the tiny verify
+    # budget stalls instead of re-certifying; these rows are cheap -> cold
+    if any(st in ('SMEAR', 'SMEARFS', 'CLEAN') for st in strategy):
+        seeded, e_prev = False, None
+    else:
+        seeded, e_prev = seed_from_chk(mf, tag)
+    if seeded:
+        dm0 = mf.make_rdm1(mf.mo_coeff, mf.mo_occ)
+        notes = ['warm verify']
+    else:
+        notes = []
+    mf.chkfile, mf.conv_tol = f'{tag}.chk', CONV_TOL
+    stages, wall, cc_last = [], 0.0, None
+    for st in strategy:
+        if st == 'DIIS':
+            mf.diis_start_cycle = DIIS_START
+            mf.max_cycle = WARM_MAX_SCF if seeded else MAX_DIIS
+            cc, t = _counted_kernel(mf, dm0)
+            stages.append(_stage('DIIS', cc))
+        elif st == 'SOSCF':
+            mf = mf.newton()
+            mf.max_cycle = WARM_MAX_SCF if seeded else MAX_SOSCF
+            cc, t = _counted_kernel(mf, dm0)
+            stages.append(_stage('SOSCF', cc))
+        elif st == 'SMEAR':
+            mf = smear_scf(mf, SMEAR_SIGMA)
+            # smearing recasts ROHF as an RHF-class object: its kernel wants
+            # the spin-summed total dm, not the spin-resolved (2,nao,nao)
+            # a native ROHF kernel takes; rebuild it straight from the seeded
+            # (possibly fractional) occ — ROHF.make_rdm1 would binarize them
+            # (occ>0 / occ==2) and break the electron count (smeared UKS
+            # stays UHF-like: its 3D dm needs no change)
+            if (dm0 is not None and np.ndim(dm0) == 3
+                    and not mf.istype('UHF')):
+                dm0 = np.dot(mf.mo_coeff * mf.mo_occ, mf.mo_coeff.T)
+            mf.max_cycle = WARM_MAX_SCF if seeded else MAX_DIIS
+            cc, t = _counted_kernel(mf, dm0)
+            stages.append(_stage('SMEAR', cc))
+            notes.append(f'gaussian smear sigma={SMEAR_SIGMA}')
+        elif st == 'SMEARFS':
+            mf = _smear_fn(mf, sigma=SMEAR_SIGMA, fix_spin=True)
+            mf.max_cycle = MAX_DIIS
+            cc, t = _counted_kernel(mf, dm0)
+            stages.append(_stage('SMEARFS', cc))
+            notes.append(f'gaussian smear sigma={SMEAR_SIGMA}, fix_spin')
+        elif st == 'CLEAN':
+            dm = mf.make_rdm1()                  # possibly fractional dm
+            mf = make_scf(ctx, kind, xc)         # fresh integer object
+            mf.chkfile, mf.conv_tol = f'{tag}.chk', CONV_TOL
+            mf.max_cycle = MAX_DIIS              # explicit: no pyscf default
+            cc, t = _counted_kernel(mf, dm)
+            stages.append(_stage('CLEAN', cc))
+            notes.append('integer restart from smeared dm')
+        else:
+            raise ValueError(f'unknown strategy stage: {st}')
+        wall += t; cc_last = cc
+        if mf.converged:
+            break
+    if seeded and e_prev is not None and mf.converged:
+        d = abs(mf.e_tot - e_prev)
+        notes.append(f'stationary: dE_vs_chk {d:.1e}')
+        if d > 1e-7:
+            notes.append('CHECK: differs from chk!')
+    mf._meta = dict(cycles=' + '.join(stages), t=wall,
+                    gap=frontier_gap(mf), prec=cc_last.prec)
+    return mf, '; '.join(notes) or '->'.join(strategy)
+
+
+# ---------------- final-table machinery ----------------------------------
+def add_row(ctx, name, mf, note, s2=None, cfg=None):
+    """Register one variant; convergence metadata comes from mf._meta.
+    mf is kept in the row: later stages seed from it (mf_ref, stage-3 dms).
+    <Sz> from occupations: per-spin occ (UHF/UKS class, incl. fix_spin
+    smearing) give the exact value; ROHF and CAS(n) have (na-nb)/2; the
+    spin-summed smeared ensembles have none ('n/a')."""
+    conv = bool(getattr(mf, 'converged', False))
+    if conv and s2 is None:
+        try:    s2 = mf.spin_square()[0]
+        except Exception: s2 = np.nan       # undefined for smeared objects
+    if conv and cfg is None:
+        cfg = valence_config(ctx, mf.mo_occ, mf.mo_coeff)
+    occ = np.asarray(mf.mo_occ, dtype=float)
+    if occ.ndim == 2:                       # per-spin occ (UHF/UKS class)
+        szv = float(occ[0].sum() - occ[1].sum()) / 2
+    elif hasattr(mf, 'ncas'):
+        szv = (ctx.na - ctx.nb) / 2         # CAS(n): active (na,nb) fixed
+    elif hasattr(mf, 'istype') and mf.istype('ROHF'):
+        szv = (ctx.na - ctx.nb) / 2         # ROHF: fixed (na,nb)
+    else:                                   # spin-summed smeared ensemble
+        szv = None
+    meta = getattr(mf, '_meta', {})
+    if meta.get('gap') is not None:
+        print(f'  frontier gap: {fmt_gap(meta["gap"])}')
+    ctx.rows.append(dict(name=name, mf=mf, conv=conv, E=mf.e_tot, S2=s2,
+                         Sz=szv, cfg=cfg, note=note,
+                         cycles=meta.get('cycles', '—'),
+                         t=meta.get('t', 0.0), gap=meta.get('gap'),
+                         prec=meta.get('prec', '—')))
+
+
+# ---------------- stage 1 -------------------------------------------------
+def stage1_scf(ctx):
+    """All single-reference variants (declarative STAGE1)."""
+    for name, kind, strategy in STAGE1:
+        mf, note = run_scf(ctx, name, kind, strategy,
+                           xc=XC if kind == 'UKS' else None)
+        add_row(ctx, name, mf, note)
+
+
+# ---------------- stage 2 -------------------------------------------------
+def pick_cas(ctx, mf, nelec_val=6, ncas=NCAS):
+    """Frontier rule: walk occupied MOs from the TOP of the energy scale,
+    accumulating occupations until nelec_val electrons are gathered (this
+    captures all partially occupied frontier orbitals plus the doubly
+    occupied one that completes the count); remaining CAS slots are filled
+    with the LOWEST virtuals (correlating partners). Designed for the
+    atom's open-valence frontier; heuristic in general."""
+    e, occ = mf.mo_energy, mf.mo_occ
+    occ_idx = sorted((i for i in range(ctx.mol.nao) if occ[i] > 1e-8),
+                     key=lambda i: -e[i])
+    val, ne = [], 0.0
+    for i in occ_idx:                    # occupied, highest energy first
+        val.append(i)
+        ne += occ[i]                     # gather electrons shell by shell
+        if ne >= nelec_val - 1e-8:       # 6 valence electrons collected
+            break
+    virt = sorted((i for i in range(ctx.mol.nao) if occ[i] <= 1e-8),
+                  key=lambda i: e[i])
+    picked = val + virt[:ncas - len(val)]
+    W = l_weights(ctx, mf.mo_coeff)
+    dom, pur = W.argmax(0), W.max(0)
+    print('\n--- CAS picks (1-based) ---')
+    for part, lst in (('occ', val), ('virt', virt[:ncas - len(val)])):
+        for i in lst:
+            print(f'  MO {i+1:3d} {part}  occ={occ[i]:.1f}  e={e[i]:+.4f}'
+                  f'  char={"spdfgh"[dom[i]]}  purity={pur[i]:.2f}')
+    comp = {}
+    for i in picked:
+        comp[dom[i]] = comp.get(dom[i], 0) + 1
+    print('  CAS composition: '
+          + ' '.join(f'{"spdfgh"[l]}^{comp[l]}' for l in sorted(comp)))
+    return sorted(i + 1 for i in picked)
+
+
+def csf_config_histogram(ctx, mc, cutoff=CSF_CUTOFF):
+    """Aggregate determinant weights c_I^2 over configuration classes,
+    labeled by the dominant Lowdin character of each active MO (bit j of
+    the string integer = active orbital j in the sort_mo feed order; bin()
+    is MSB-first, so int(str(sa), 2) puts orbital 0 in bit 0). The bit -> l
+    map is derived at runtime from the active orbitals. Determinant-level:
+    Hund-coupled atomic terms bundle several determinants, so class weights
+    are lower bounds of term weights."""
+    act = mc.mo_coeff[:, mc.ncore:mc.ncore + mc.ncas]
+    dom = np.array(list('spdfgh'))[l_weights(ctx, act).argmax(0)]
+    print('  active-orbital l-map:', ' '.join(dom))
+    hist, betas = defaultdict(float), set()
+    for c, sa, sb in large_ci_cut(mc.ci, mc.ncas, mc.nelecas, cutoff):
+        a = int(str(sa), 2)
+        cnt = {l: 0 for l in 'spdfgh'}
+        for j in range(mc.ncas):
+            if (a >> j) & 1:
+                cnt[dom[j]] += 1
+        key = ' '.join(f'{l}^{cnt[l]}' for l in 'spdf' if cnt[l])
+        hist[key] += c * c
+        betas.add(str(sb))
+    return dict(sorted(hist.items(), key=lambda kv: -kv[1])), betas
+
+
+def run_casscf(ctx, mf_ref, cas_idx, e_casci):
+    """CASSCF solve + diagnostics. Warm start: mo0 (orbitals) and ci0 (CI
+    vector) from casscf.chk; the short re-run's stationarity certifies the
+    stored solution. Natural orbitals: per-orbital occupations exist only
+    in the frame that diagonalizes the 1-RDM, so NOs/NOONs are computed
+    for valence_config and the stage-3 guess — a representation change,
+    no new information; the equivalent raw spin-dm seeding (make_rdm1s)
+    is noted in stage3_scf."""
+    mc = mcscf.CASSCF(mf_ref, len(cas_idx), NELECAS)
+    mc.chkfile = 'casscf.chk'
+    mc.chk_ci = True                # store 'ci_vector' for later warm starts
+    mc.conv_tol = CONV_TOL
+    mc.verbose = VERBOSE
+    mo0, ci0, e_prev = mc.sort_mo(cas_idx), None, None
+    warm = WARM and os.path.exists('casscf.chk')
+    if warm:
+        try:
+            rec = lib_chk.load('casscf.chk', 'mcscf')   # dump key, PySCF 2.13
+            if rec.get('mo_coeff') is not None:
+                mo0 = rec['mo_coeff']; ci0 = rec.get('ci_vector')
+                e_prev = rec.get('e_tot')
+                print(f'  [casscf] warm seed (E_prev={e_prev})')
+            else:
+                print('  [casscf] chk has no orbitals -> cold start')
+                warm = False
+        except Exception as ex:
+            print('  [casscf] chk seed failed:', ex); warm = False
+    mc.max_cycle_macro = WARM_MAX_MACRO if warm else MAX_MACRO
+    cc = CycleCounter(); mc.callback = cc
+    t0 = time.perf_counter()
+    mc.kernel(mo0) if ci0 is None else mc.kernel(mo0, ci0)
+    t_cas = time.perf_counter() - t0
+    if e_prev is not None:
+        d = mc.e_tot - e_prev
+        print(f'  [casscf] stationarity: E - E_chk = {d:.2e}'
+              + ('' if abs(d) < 1e-7 else '  <- raise WARM_MAX_MACRO'))
+
+    # Natural orbitals: a representation change only (see docstring)
+    noon, natorb = addons.make_natural_orbitals(mc)
+    ss, _ = addons.spin_square(mc)
+    cfg = valence_config(ctx, noon, natorb)
+    print(f'\nE(CASSCF) = {mc.e_tot:.8f}   <S^2> = {ss:.4f}   (want ~6)')
+    print('dE(CASSCF-ROHF) =', mc.e_tot - mf_ref.e_tot,
+          '  (must be small & negative)')
+    if e_casci is not None:
+        print('orbital-relaxation gain, E(CASCI)-E(CASSCF) =',
+              e_casci - mc.e_tot)
+    print('CASSCF NOONs:', np.round(noon[::-1], 3))
+
+    ci_arr = np.asarray(mc.ci).ravel()
+    w_max = float(np.max(np.abs(ci_arr))**2)     # determinant-dominance bound
+    dom_cls = ''
+    if PRINT_CSF:
+        try:
+            hist, betas = csf_config_histogram(ctx, mc)
+            print('configuration histogram (alpha classes, |c| > cutoff):')
+            for k, v in hist.items():
+                print(f'   {k:16s}  sum_w = {v:.3f}')
+            print('   listed total =', round(sum(hist.values()), 3),
+                  ' beta strings:', betas,
+                  '(bit 0 = first active MO = 7s in the standard pick)')
+            if hist:
+                dom_cls = f'; dom class {next(iter(hist))}'
+        except Exception as ex:
+            print('  (histogram unavailable:', ex, ')')
+        try:
+            print('leading determinants:')
+            for c, sa, sb in large_ci_cut(mc.ci, mc.ncas, mc.nelecas):
+                print(f'  {c:+.4f}  w={c*c:.3f}  a:{sa}  b:{sb}')
+        except Exception as ex:
+            print('  (large_ci listing unavailable:', ex, ')')
+    note = (f'CAS({sum(NELECAS)},{len(cas_idx)}) from seed-row MOs; '
+            f'w_max={w_max:.2f}' + dom_cls
+            + (f'; relax gain {e_casci - mc.e_tot:+.4f}' if e_casci else ''))
+    mc._meta = dict(cycles=_stage('casscf', cc), t=t_cas, gap=None, prec=cc.prec)
+    add_row(ctx, 'CASSCF', mc, note, s2=ss, cfg=cfg)
+    return mc, noon, natorb, ss, cfg
+
+
+def run_casci(ctx, mf_ref, cas_idx, preflight):
+    """CASCI on frozen seed-row MOs — seconds; adds a table row. With
+    preflight, prints the NOONs. CASCI.make_rdm1 returns the density in
+    the non-orthogonal AO representation, so occupations require the
+    generalized problem eigh(S dm S, b=S) (bare eigenvalues of dm are
+    meaningless); eigenvectors are already AO coefficients for the Lowdin
+    analysis."""
+    mci = mcscf.CASCI(mf_ref, len(cas_idx), NELECAS)
+    mci.verbose = VERBOSE
+    cc, t = _counted_kernel(mci, mci.sort_mo(cas_idx))
+    dm_ao = mci.make_rdm1()
+    S = mci._scf.get_ovlp()
+    noon, natorb = _sc_eigh(S @ dm_ao @ S, S)
+    noon, natorb = noon[::-1], natorb[:, ::-1]
+    if preflight:
+        print('CASCI NOONs (top 15):', np.round(noon[:15], 3),
+              ' sum =', round(float(noon.sum()), 3))
+    ss, _ = addons.spin_square(mci)
+    cfg = valence_config(ctx, noon, natorb)
+    mci._meta = dict(cycles='—' if not cc.n else _stage('casci', cc),
+                     t=t, gap=None, prec=cc.prec)
+    add_row(ctx, 'CASCI', mci, 'frozen seed-row MOs', s2=ss, cfg=cfg)
+    return mci.e_tot
+
+
+def stage2_cas(ctx):
+    """Declarative STAGE2 (see the comment on the list). The seed row
+    supplies MOs (fail-fast if missing or unconverged); the CAS is picked
+    once per seed; CASCI rows are cheap pre-flights (frozen MOs) whose E
+    doubles as the orbital-relaxation metric for CASSCF."""
+    picked, e_casci = {}, None
+    for name, kind, seed, preflight in STAGE2:
+        ref = next((r for r in ctx.rows if slug(r['name']) == seed), None)
+        if ref is None or not ref['conv']:
+            raise RuntimeError(
+                f'STAGE2 seed row {seed!r} missing or not converged — fix '
+                f'stage 1 first. No automatic reference substitution.')
+        if seed not in picked:
+            if CAS_MANUAL is not None:
+                assert len(set(CAS_MANUAL)) == NCAS
+                picked[seed] = list(CAS_MANUAL)
+            else:
+                picked[seed] = pick_cas(ctx, ref['mf'])
+            print('\nCAS candidate (1-based):', picked[seed])
+        cas_idx = picked[seed]
+        if kind == 'CASCI':
+            e_casci = run_casci(ctx, ref['mf'], cas_idx, preflight)
+        else:
+            ctx.mf_ref = ref['mf']
+            print(f"\n** CASSCF reference: {ref['name']}  "
+                  f"E={ctx.mf_ref.e_tot:.8f} **")
+            ctx.mc, ctx.noon, ctx.natorb, _, _ = \
+                run_casscf(ctx, ref['mf'], cas_idx, e_casci)
+
+
+# ---------------- stage 3 -------------------------------------------------
+def spin_occs_from_noons(noon, na, nb):
+    """NOON ranking -> binary (alpha, beta) occupations for the SCF guess
+    (a guess convention only — the kernel re-derives occupations): beta
+    fills the nb largest NOONs (core ~2), alpha the na largest -> na-nb
+    unpaired alpha (Sz = 2) emerges automatically."""
+    idx = np.argsort(-noon)                  # descending NOONs
+    oa = np.zeros(len(noon)); oa[idx[:na]] = 1.0
+    ob = np.zeros(len(noon)); ob[idx[:nb]] = 1.0
+    return oa, ob
+
+
+def stage3_scf(ctx):
+    """SCF experiments after stage 2 (declarative STAGE3; not necessarily
+    restarts). Seeds: None = cold start (default guess); 'casscf' = natural
+    orbitals + NOON-ranked binary occupations (same orbital character as
+    CASSCF, so dE measures correlation treatment, not a different
+    solution); a slug of an earlier row = that row's converged dm. The
+    NOON step is a guess convention — the kernel re-derives integer
+    occupations every cycle and only dm0 matters for the trajectory; the
+    equivalent raw spin-resolved density, dm0 = ctx.mc.make_rdm1s(), is
+    the documented alternative."""
+    mo2 = np.asarray((ctx.natorb, ctx.natorb))
+    occ2 = np.asarray(spin_occs_from_noons(ctx.noon, ctx.na, ctx.nb))
+    for name, kind, seed, strategy in STAGE3:
+        xc = XC if kind == 'UKS' else None
+        if seed is None:
+            dm0 = None                        # cold start, default guess
+        elif seed == 'casscf':
+            dm0 = make_scf(ctx, kind, xc).make_rdm1(mo2, occ2)
+        else:   # an earlier row's dm; the row may come from this same loop
+            row = next((r for r in ctx.rows
+                        if slug(r['name']) == seed), None)
+            if row is None:
+                raise KeyError(f"seed row {seed!r} not found — it must run "
+                               f"EARLIER in STAGE3 than {name!r}")
+            dm0 = row['mf'].make_rdm1()
+        mf, note = run_scf(ctx, name, kind, strategy, xc=xc, dm0=dm0)
+        if kind == 'UHF':    # judgment deferred to cfg + <S^2> columns:
+            note += (f'; dE vs ROHF {mf.e_tot - ctx.mf_ref.e_tot:+.2e}'
+                     ' (polarized core if cfg matches)')
+        add_row(ctx, name, mf, note)
+
+
+# ---------------- report --------------------------------------------------
+def report(ctx):
+    """Final comparison table (text + results.md), same columns in both.
+    No '|' inside cells — raw pipes break markdown table columns."""
+    mc = ctx.mc
+    hdr = (f"{'method':26} {'conv':>5} {'iterations':>26} {'tolerance':>24} "
+           f"{'E, Eh':>16} {'dE,mEh':>9} {'E,eV':>13} {'dE,eV':>8} "
+           f"{'<S^2>':>7} {'<Sz>':>6} {'match':>6}  {'configuration':30} note")
+    md = ['| Method | Conv | Iterations | Tolerance | E, Eh | ΔE, mEh | '
+          'E, eV | ΔE, eV | ⟨S²⟩ | ⟨Sz⟩ | Configuration | Match to ground '
+          '| Note |',
+          '|---|---|---|---|---|---|---|---|---|---|---|---|---|']
+    print('\n' + '=' * 20 + ' final comparison ' + '=' * 20)
+    print(hdr)
+    for r in ctx.rows:
+        conv = '✔' if r['conv'] else '✘'
+        hit = '✔' if config_matches(r['cfg']) else '✘'
+        dE_m = f"{(r['E'] - mc.e_tot)*1e3:+.2f}" if r['conv'] else 'n/a'
+        dE_e = f"{(r['E'] - mc.e_tot)*HARTREE2EV:+.3f}" if r['conv'] else 'n/a'
+        e_ev = f"{r['E'] * HARTREE2EV:.4f}"
+        s2s = 'n/a' if r['S2'] is None or r['S2'] != r['S2'] else f"{r['S2']:.3f}"
+        szs = 'n/a' if r['Sz'] is None else f"{r['Sz']:.2f}"
+        print(f"{r['name']:26} {conv:>5} {r['cycles']:>26} {r['prec']:>24} "
+              f"{r['E']:16.8f} {dE_m:>9} {e_ev:>13} {dE_e:>8} {s2s:>7} "
+              f"{szs:>6} {hit:>6}  {fmt_cfg(r['cfg']):30} {r['note']}")
+        md.append(f"| {r['name']} | {conv} | {r['cycles']} | {r['prec']} | "
+                  f"{r['E']:.8f} | {dE_m} | {e_ev} | {dE_e} | {s2s} | {szs} | "
+                  f"{fmt_cfg(r['cfg'])} | {hit} | {r['note']} |")
+    with open('results.md', 'w') as f:
+        f.write('\n'.join(md) + '\n')
+    print('\nmarkdown table written to results.md')
+    print('  * = a SMEAR stage in the strategy (see note); dE vs CASSCF is')
+    print('  comparable only among HF-based rows; frontier gaps are printed')
+    print('  per row in the run log.')
+    print('  the UHF 5f^4 6d^0 collapse: integer occupations cannot hold the')
+    print('  5f/6d-degenerate frontier — the very reason the CAS is needed.')
+
+
+# ---------------- main ----------------------------------------------------
+def main():
+    ctx = build_system()
+    stage1_scf(ctx)
+    stage2_cas(ctx)
+    stage3_scf(ctx)
+    report(ctx)
+
+
+if __name__ == '__main__':
+    main()#INFO: ******************** input file end ********************
+
+
+System: uname_result(system='Linux', node='irbis', release='7.0.0-30-generic', version='#30~24.04.1-Ubuntu SMP PREEMPT_DYNAMIC Fri Aug  7 13:27:52 UTC 2', machine='x86_64')  Threads 128
+Python 3.12.13 | packaged by Anaconda, Inc. | (main, Mar 19 2026, 20:20:58) [GCC 14.3.0]
+numpy 2.5.1  scipy 1.18.0  h5py 3.16.0
+Date: Sun Oct  4 22:58:28 2026
+PySCF version 2.13.1
+PySCF path  /home/kashpur/miniconda3/envs/pyscf/lib/python3.12/site-packages/pyscf
+
+[CONFIG] conf_file None
+[INPUT] verbose = 4
+[INPUT] num. atoms = 1
+[INPUT] num. electrons = 32
+[INPUT] charge = 0
+[INPUT] spin (= nelec alpha-beta = 2S) = 4
+[INPUT] symmetry False subgroup None
+[INPUT] Mole.unit = B
+[INPUT] Symbol           X                Y                Z      unit          X                Y                Z       unit  Magmom
+[INPUT]  1 U      0.000000000000   0.000000000000   0.000000000000 AA    0.000000000000   0.000000000000   0.000000000000 Bohr   0.0
+
+nuclear repulsion = 0
+number of shells = 49
+number of NR pGTOs = 177
+number of NR cGTOs = 177
+basis = {'U': [[0, [30.9793695, 1.0]], [0, [19.3389862, 1.0]], [0, [11.9091789, 1.0]], [0, [7.28108692, 1.0]], [0, [4.52381555, 1.0]], [0, [2.6914787, 1.0]], [0, [1.62933419, 1.0]], [0, [1.0281067, 1.0]], [0, [0.605884393, 1.0]], [0, [0.355646976, 1.0]], [0, [0.201800187, 1.0]], [0, [0.12481356, 1.0]], [0, [0.0638361554, 1.0]], [0, [0.0329899773, 1.0]], [0, [0.0168638039, 1.0]], [1, [41.7040704, 1.0]], [1, [24.7028799, 1.0]], [1, [14.4963977, 1.0]], [1, [8.57586995, 1.0]], [1, [4.98086081, 1.0]], [1, [2.84040828, 1.0]], [1, [1.59903715, 1.0]], [1, [0.864765972, 1.0]], [1, [0.457242055, 1.0]], [1, [0.238933519, 1.0]], [1, [0.118792999, 1.0]], [1, [0.0570066185, 1.0]], [1, [0.0269891792, 1.0]], [1, [0.0127490309, 1.0]], [2, [13.8063993, 1.0]], [2, [8.06231666, 1.0]], [2, [4.663754, 1.0]], [2, [2.63565039, 1.0]], [2, [1.45796002, 1.0]], [2, [0.774812159, 1.0]], [2, [0.372484724, 1.0]], [2, [0.171955342, 1.0]], [2, [0.076133609, 1.0]], [2, [0.0320319168, 1.0]], [3, [36.8446566, 1.0]], [3, [19.8480492, 1.0]], [3, [10.7216853, 1.0]], [3, [5.70450122, 1.0]], [3, [2.92433437, 1.0]], [3, [1.43960404, 1.0]], [3, [0.673859301, 1.0]], [3, [0.294349701, 1.0]], [3, [0.11323985, 1.0]], [3, [0.054573252, 1.0]]]}
+ecp = {'U': [60, [[-1, [[], [[360.6315501468202, -28.64742114130145]], [[2065.131979133357, 97.22299298390718], [508.2356837089516, 396.1667080905177], [342.540793081134, -172.7361221647992], [76.27341270893233, -501.7576344637667], [54.40912754834765, 348.6201928187299], [38.5895164440505, -242.6459139898578], [16.14820080555046, -49.91970370243537], [7.024134652169744, -5.163954898364588], [2.516814643894863, -0.1231613844645565], [1.572906717635522, 0.02992202448477607], [0.9634371755100256, -0.005796070977516611], [0.5847142804181048, 0.0003819469723890031], [0.116451251680859, -3.715303401337178e-05], [0.02938490053984713, -2.206818613484872e-06], [0.008511875915625303, -6.057414003066741e-07], [0.00180537231143657, 2.155264331858628e-08]], [], [], [], []]], [0, [[[0.2317014268741285, 10.0]], [[242.9179564142772, 46.11674258885296], [162.5245117725116, -173.75422314764], [109.5811896748054, 493.8218589747339], [72.99200989088527, -827.2746944763821], [46.29879120425043, 502.7935917757445]], [[56.20446814945348, 3762.479536922336], [39.03246086970426, -8139.22414350498], [27.10314958862108, 8135.642373621093], [18.59511711210433, -6569.584218738812], [12.60710893702717, 4267.325782201637], [8.526947878019678, -2016.31063579131], [5.793034469369744, 862.7465992210173], [3.934984519097092, -400.0420116141454], [2.658392335668391, 150.2081101762968], [1.788492782986496, -71.2647546758148], [1.187818827820123, 18.87876566602031], [0.7872486852090064, -11.49617071779201], [0.5067914638051081, 0.2949813229133569], [0.3320636860499803, -2.22714520742996], [0.2133601212283606, -0.1339427383488657]], [], [], [], []]], [1, [[[0.1108944958616423, 9.0, 0.0]], [[91.3099939800914, 39.43091155859992, 1.2868392460372673]], [[231.9471944082305, -130.5646063454102, 34.1009349202808], [78.8932945001493, -435.0767791040475, -239.44933963593928], [52.4118696904922, 1120.493551630994, 576.4490984194844], [34.10475831644786, -1408.450227843489, -734.4257452903819], [21.14799459689021, 2252.035967256824, 726.3420204147712], [14.321414100288, -2905.159572512028, -407.8106925799121], [10.37715993218774, 2312.957559604401, -116.50077200092446], [7.339074963666151, -798.878118157523, 258.17077864365115], [4.572058172104139, 136.9515924179399, -99.60800249174287], [2.78135822823178, -56.70086567452772, 33.696372619019115], [1.684431365497172, 9.614041176947085, -11.189079182991913], [1.090478164140486, -11.84551160141148, 3.0042645822313934], [0.4263912578748079, -3.014060937410117, -0.40309926607178365], [0.2501560815003279, -0.7627218157722118, 0.23556273500339608], [0.154624751506665, -0.8519542407538329, -0.08757843418632112], [0.07132156441438754, -0.02575978639077353, 0.018905606449449386], [0.03953736471272211, 0.004336813593023247, -0.007399412539668166], [0.02234894684119505, -0.0008300072330660706, 0.002030421330971634], [0.01274999593097006, 0.000103467954636206, -0.00028761741735724565]], [], [], [], []]], [2, [[[0.2070300297624345, 7.0, 0.0]], [[47.02977455813188, 21.41728289187231, 0.049738916067073806], [13.17414908396318, 82.59465592231041, 1.024509354852414], [9.416625389969232, -65.21423256180505, -0.8747445091054993]], [[5.696403263371752, 246.1504948976392, -3.052133859339966], [4.100924963821768, -216.9610434772588, 7.674148930744497], [2.83957833303786, 85.14127259738486, -3.832799226328382], [1.967778260176243, -34.25996808477208, 0.79590319421592], [0.6161014542450013, -4.062739567645936, -0.012320143966438213], [0.2724940847236936, -1.20696432352406, 0.001558231901044771], [0.07347608472042746, -0.00111514084883914, -5.8698583324766006e-05]], [], [], [], []]], [3, [[[43.30082314075, 4.0, 0.0]], [[24.72205802454236, 86.254462379382, -0.15132776512445034], [13.35100063135517, -46.18837754801446, 0.15868318211336938]], [[10.63771884070873, 331.747194238869, 0.7837965264756365], [7.247931526310381, -132.9225343905385, -1.8085172767633415], [3.873957923828072, 47.53416688051445, 1.041372883387611], [2.178937006211554, -12.28463466483176, -0.2541414420277123], [1.469951720761049, 3.654142564137235, 0.061812396104751796], [1.003283520090549, -0.4392882501988922, -0.0043727739828141364]], [], [], [], []]], [4, [[], [[360.6315501468202, 0.0, 0.42699183276924063]], [[2065.131979133357, 0.0, -3.7801783000011113], [508.2356837089516, 0.0, -0.3206296587203513], [342.540793081134, 0.0, -3.5000536120442263], [76.27341270893233, 0.0, 14.58464466061519], [54.40912754834765, 0.0, -10.241596153018214], [38.5895164440505, 0.0, 4.009689795850191], [16.14820080555046, 0.0, -0.12252793316309282], [7.024134652169744, 0.0, 0.036224869992661], [2.516814643894863, 0.0, -0.011239265096532442], [1.572906717635522, 0.0, 0.008524653716879146], [0.9634371755100256, 0.0, -0.002503206047571664], [0.5847142804181048, 0.0, 0.0005539176168471953], [0.116451251680859, 0.0, 9.326732785599991e-06], [0.02938490053984713, 0.0, 6.239844823788785e-07], [0.008511875915625303, 0.0, 7.367457683849774e-09], [0.00180537231143657, 0.0, 8.790801096304475e-09]], [], [], [], []]]]]}
+CPU time:        13.37
+pyscf integrals:
+> overlap done
+> kinetic done
+> nuclear attraction done
+> ecp scalar done
+> ecp spin-orbit done
+libgrpp integrals:
+> overlap done
+> kinetic done
+> nuclear attraction done
+> ecp scalar done
+> ecp spin-orbit done
+-------------------------------------------------------------------
+integrals               max abs diff       pyscf,sec   libgrpp,sec
+-------------------------------------------------------------------
+overlap                 1.11022302e-15         0.162         0.009
+kinetic energy          3.56669041e-14         0.029         0.008
+nuclear attraction      0.00000000e+00         0.017         0.016
+scalar-rel ecp          2.36468622e-11         0.345         0.044
+spin-orbit ecp (x)      5.32825737e-13         0.782         0.031
+spin-orbit ecp (y)      5.32825737e-13            --            --
+spin-orbit ecp (z)      5.32825743e-13            --            --
+  [rohf] warm seed (E_prev=-473.54496952)
+/home/kashpur/miniconda3/envs/pyscf/lib/python3.12/site-packages/pyscf/gto/mole.py:1289: UserWarning: Function mol.dumps drops attribute U because it is not JSON-serializable
+  warnings.warn(msg)
+converged SCF energy = -473.544969520198
+  per-l raw: {'s': 5.98, 'p': 12.0, 'd': 11.02, 'f': 3.0} 
+  valence  : {'s': 1.98, 'd': 1.02, 'f': 3.0}
+  frontier gap: 3.2e-02
+
+WARN: Invalid number of electrons 32 for RHF method.
+
+/home/kashpur/miniconda3/envs/pyscf/lib/python3.12/site-packages/pyscf/gto/mole.py:1289: UserWarning: Function mol.dumps drops attribute U because it is not JSON-serializable
+  warnings.warn(msg)
+converged SCF energy = -472.654912197382
+  per-l raw: {'s': 6.01, 'p': 12.17, 'd': 11.9, 'f': 1.92} 
+  valence  : {'s': 2.01, 'p': 0.17, 'd': 1.9, 'f': 1.92}
+  frontier gap: 2.2e-01
+  [uhf] warm seed (E_prev=-473.48831714)
+/home/kashpur/miniconda3/envs/pyscf/lib/python3.12/site-packages/pyscf/gto/mole.py:1289: UserWarning: Function mol.dumps drops attribute U because it is not JSON-serializable
+  warnings.warn(msg)
+converged SCF energy = -473.488317142786  <S^2> = 6.006244  2S+1 = 5.002497
+  per-l raw: {'s': 6.0, 'p': 12.0, 'd': 10.0, 'f': 4.0} 
+  valence  : {'s': 2.0, 'f': 4.0}
+  frontier gap: 2.0e-01/1.9e-01
+/home/kashpur/miniconda3/envs/pyscf/lib/python3.12/site-packages/pyscf/gto/mole.py:1289: UserWarning: Function mol.dumps drops attribute U because it is not JSON-serializable
+  warnings.warn(msg)
+converged SCF energy = -472.654912194867  <S^2> = -1.9895197e-13  2S+1 = 1
+  per-l raw: {'s': 6.01, 'p': 12.17, 'd': 11.9, 'f': 1.92} 
+  valence  : {'s': 2.01, 'p': 0.17, 'd': 1.9, 'f': 1.92}
+  frontier gap: 2.2e-01/2.2e-01
+  [uks_pbe] warm seed (E_prev=-475.21375587)
+radial grids: 
+    Treutler-Ahlrichs [JCP 102, 346 (1995); DOI:10.1063/1.469408] (M4) radial grids
+    
+becke partition: Becke, JCP 88, 2547 (1988); DOI:10.1063/1.454033
+pruning grids: <function nwchem_prune at 0x7575acd2ae80>
+grids dens level: 3
+symmetrized grids: False
+atomic radii adjust function: <function treutler_atomic_radii_adjust at 0x7575acd2ade0>
+tot grids = 24384
+/home/kashpur/miniconda3/envs/pyscf/lib/python3.12/site-packages/pyscf/gto/mole.py:1289: UserWarning: Function mol.dumps drops attribute U because it is not JSON-serializable
+  warnings.warn(msg)
+converged SCF energy = -475.21375586972  <S^2> = 6.0092874  2S+1 = 5.0037136
+  per-l raw: {'s': 6.0, 'p': 12.0, 'd': 10.36, 'f': 3.64} 
+  valence  : {'s': 2.0, 'd': 0.36, 'f': 3.64}
+  frontier gap: 1.3e-02/8.2e-02
+radial grids: 
+    Treutler-Ahlrichs [JCP 102, 346 (1995); DOI:10.1063/1.469408] (M4) radial grids
+    
+becke partition: Becke, JCP 88, 2547 (1988); DOI:10.1063/1.454033
+pruning grids: <function nwchem_prune at 0x7575acd2ae80>
+grids dens level: 3
+symmetrized grids: False
+atomic radii adjust function: <function treutler_atomic_radii_adjust at 0x7575acd2ade0>
+tot grids = 24384
+/home/kashpur/miniconda3/envs/pyscf/lib/python3.12/site-packages/pyscf/gto/mole.py:1289: UserWarning: Function mol.dumps drops attribute U because it is not JSON-serializable
+  warnings.warn(msg)
+converged SCF energy = -475.089606388667  <S^2> = -3.4106051e-13  2S+1 = 1
+  per-l raw: {'s': 5.64, 'p': 12.12, 'd': 11.04, 'f': 3.2} 
+  valence  : {'s': 1.64, 'p': 0.12, 'd': 1.04, 'f': 3.2}
+  frontier gap: 6.9e-01/6.9e-01
+radial grids: 
+    Treutler-Ahlrichs [JCP 102, 346 (1995); DOI:10.1063/1.469408] (M4) radial grids
+    
+becke partition: Becke, JCP 88, 2547 (1988); DOI:10.1063/1.454033
+pruning grids: <function nwchem_prune at 0x7575acd2ae80>
+grids dens level: 3
+symmetrized grids: False
+atomic radii adjust function: <function treutler_atomic_radii_adjust at 0x7575acd2ade0>
+tot grids = 24384
+/home/kashpur/miniconda3/envs/pyscf/lib/python3.12/site-packages/pyscf/gto/mole.py:1289: UserWarning: Function mol.dumps drops attribute U because it is not JSON-serializable
+  warnings.warn(msg)
+converged SCF energy = -475.132284326177  <S^2> = 0.0045705312  2S+1 = 1.0090997
+  per-l raw: {'s': 5.51, 'p': 12.13, 'd': 11.12, 'f': 3.24} 
+  valence  : {'s': 1.51, 'p': 0.13, 'd': 1.12, 'f': 3.24}
+  frontier gap: 7.0e-01/6.7e-01
+
+--- CAS picks (1-based) ---
+  MO  18 occ  occ=1.0  e=-0.0169  char=f  purity=1.00
+  MO  17 occ  occ=1.0  e=-0.0179  char=f  purity=1.00
+  MO  16 occ  occ=1.0  e=-0.0179  char=f  purity=1.00
+  MO  15 occ  occ=1.0  e=-0.0356  char=d  purity=0.98
+  MO  14 occ  occ=2.0  e=-0.1979  char=s  purity=0.98
+  MO  19 virt  occ=0.0  e=+0.0146  char=p  purity=1.00
+  MO  20 virt  occ=0.0  e=+0.0146  char=p  purity=1.00
+  MO  21 virt  occ=0.0  e=+0.0172  char=p  purity=1.00
+  MO  22 virt  occ=0.0  e=+0.0389  char=s  purity=1.00
+  MO  23 virt  occ=0.0  e=+0.0568  char=d  purity=1.00
+  MO  24 virt  occ=0.0  e=+0.0568  char=d  purity=1.00
+  MO  25 virt  occ=0.0  e=+0.0593  char=p  purity=1.00
+  MO  26 virt  occ=0.0  e=+0.0593  char=p  purity=1.00
+  CAS composition: s^2 p^5 d^3 f^3
+
+CAS candidate (1-based): [14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]
+<class 'pyscf.mcscf.casci.CASCI'> does not have attributes  callback
+
+******** <class 'pyscf.mcscf.casci.CASCI'> ********
+CAS (5e+1e, 13o), ncore = 13, nvir = 151
+natorb = False
+canonicalization = True
+sorting_mo_energy = False
+max_memory 4000 MB (current use 3296 MB)
+******** <class 'pyscf.fci.direct_spin1.FCISolver'> ********
+max. cycles = 200
+conv_tol = 1e-08
+davidson only = False
+linear dependence = 1e-12
+level shift = 0.001
+max iter space = 12
+max_memory 4000 MB
+nroots = 1
+pspace_size = 400
+spin = None
+Density matrix diagonal elements [1.92771915e+00 9.95689178e-01 9.99333319e-01 9.99333496e-01
+ 9.99994678e-01 1.18058872e-02 1.18058590e-02 1.97414092e-03
+ 1.44833669e-03 1.30419233e-02 1.30418824e-02 1.24060751e-02
+ 1.24060729e-02]
+CASCI converged
+CASCI E = -473.556173571334  E(CI) = -6.86876918248424  S^2 = 6.0000000
+CASCI NOONs (top 15): [2.    2.    2.    2.    2.    2.    2.    2.    2.    2.    2.    2.
+ 2.    1.928 1.   ]  sum = 32.0
+  per-l raw: {'s': 5.91, 'p': 12.05, 'd': 11.04, 'f': 3.0} 
+  valence  : {'s': 1.91, 'p': 0.05, 'd': 1.04, 'f': 3.0}
+
+** CASSCF reference: ROHF  E=-473.54496952 **
+  [casscf] warm seed (E_prev=-473.6007228174973)
+
+******** <class 'pyscf.mcscf.mc1step.CASSCF'> ********
+CAS (5e+1e, 13o), ncore = 13, nvir = 151
+max_cycle_macro = 6
+max_cycle_micro = 4
+conv_tol = 1e-09
+conv_tol_grad = None
+orbital rotation max_stepsize = 0.02
+orbital rotation threshold for CI restart = 0.01
+augmented hessian ah_max_cycle = 30
+augmented hessian ah_conv_tol = 1e-12
+augmented hessian ah_linear dependence = 1e-14
+augmented hessian ah_level shift = 1e-08
+augmented hessian ah_start_tol = 2.5
+augmented hessian ah_start_cycle = 3
+augmented hessian ah_grad_trust_region = 3
+kf_trust_region = 3
+kf_interval = 4
+ci_response_space = 4
+ci_grad_trust_region = 3
+with_dep4 0
+natorb = False
+canonicalization = True
+sorting_mo_energy = False
+ao2mo_level = 2
+chkfile = casscf.chk
+max_memory 4000 MB (current use 3319 MB)
+internal_rotation = False
+******** <class 'pyscf.fci.direct_spin1.FCISolver'> ********
+max. cycles = 50
+conv_tol = 1e-08
+davidson only = False
+linear dependence = 1e-12
+level shift = 0.001
+max iter space = 12
+max_memory 4000 MB
+nroots = 1
+pspace_size = 400
+spin = None
+CASCI E = -473.600722808606  S^2 = 6.0000000
+Set conv_tol_grad to 3.16228e-05
+macro iter   1 (  8 JK    1 micro), CASSCF E = -473.600722812453  dE = -3.84648047e-09  S^2 = 6.0000000
+               |grad[o]|=7.2e-06  |grad[c]|=4.59e-05  |ddm|=3.13e-16  |maxRot[o]|=4.14e-05
+macro iter   2 (  4 JK    1 micro), CASSCF E = -473.600722814212  dE = -1.75879222e-09  S^2 = 6.0000000
+               |grad[o]|=3.22e-06  |grad[c]|=2.89e-05  |ddm|=4.86e-16  |maxRot[o]|=1.57e-05
+macro iter   3 (  4 JK    1 micro), CASSCF E = -473.600722815531  dE = -1.31967681e-09  S^2 = 6.0000000
+               |grad[o]|=2.87e-06  |grad[c]|=2.79e-05  |ddm|=2.53e-16  |maxRot[o]|=1.49e-05
+macro iter   4 (  1 JK    1 micro), CASSCF E = -473.600722816531  dE = -9.99932581e-10  S^2 = 6.0000000
+               |grad[o]|=1.71e-06  |grad[c]|=2.27e-05  |ddm|=4.37e-16  |maxRot[o]|=    0
+1-step CASSCF converged in   4 macro ( 17 JK   4 micro) steps
+CASSCF canonicalization
+Density matrix diagonal elements [1.83361129 0.39548053 0.71436149 0.68160854 0.59084461 0.23358015
+ 0.23967483 0.0448468  0.42695134 0.15613312 0.0726456  0.30810226
+ 0.30215944]
+CASSCF energy = -473.600722816531
+CASCI E = -473.600722816531  E(CI) = -6.89530935315292  S^2 = 6.0000000
+  [casscf] stationarity: E - E_chk = 9.66e-10
+  per-l raw: {'s': 5.84, 'p': 12.13, 'd': 11.04, 'f': 2.99} 
+  valence  : {'s': 1.84, 'p': 0.13, 'd': 1.04, 'f': 2.99}
+
+E(CASSCF) = -473.60072282   <S^2> = 6.0000   (want ~6)
+dE(CASSCF-ROHF) = -0.0557532963331937   (must be small & negative)
+orbital-relaxation gain, E(CASCI)-E(CASSCF) = 0.04454924519677661
+CASSCF NOONs: [-0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.
+ -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.
+ -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.
+ -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.
+ -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.
+ -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.
+ -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.
+ -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.     0.     0.
+  0.     0.     0.     0.     0.     0.     0.     0.     0.     0.
+  0.     0.     0.     0.     0.     0.     0.     0.     0.     0.
+  0.     0.     0.     0.     0.     0.     0.     0.     0.     0.
+  0.     0.     0.     0.     0.     0.     0.     0.     0.     0.
+  0.     0.     0.     0.     0.     0.     0.     0.     0.     0.
+  0.     0.     0.     0.     0.     0.     0.     0.     0.     0.
+  0.     0.     0.     0.     0.     0.     0.     0.     0.     0.
+  0.     0.019  0.033  0.04   0.043  0.043  0.477  0.496  0.5    0.5
+  0.501  0.508  0.992  1.848  2.     2.     2.     2.     2.     2.
+  2.     2.     2.     2.     2.     2.     2.   ]
+  active-orbital l-map: s d f f f p p p d d d f f
+configuration histogram (alpha classes, |c| > cutoff):
+   s^1 d^1 f^3       sum_w = 0.532
+   s^1 p^1 d^1 f^2   sum_w = 0.280
+   s^1 p^2 d^1 f^1   sum_w = 0.038
+   listed total = 0.85  beta strings: {'0b1'} (bit 0 = first active MO = 7s in the standard pick)
+leading determinants:
+  +0.4079  w=0.166  a:0b11111  b:0b1
+  +0.1155  w=0.013  a:0b1100111  b:0b1
+  +0.1072  w=0.011  a:0b1101011  b:0b1
+  -0.0746  w=0.006  a:0b1110011  b:0b1
+  -0.2523  w=0.064  a:0b100101101  b:0b1
+  +0.0974  w=0.009  a:0b100110101  b:0b1
+  -0.0732  w=0.005  a:0b100111001  b:0b1
+  +0.2026  w=0.041  a:0b101010101  b:0b1
+  +0.2005  w=0.040  a:0b101011001  b:0b1
+  -0.2297  w=0.053  a:0b1000011101  b:0b1
+  -0.0647  w=0.004  a:0b1001100101  b:0b1
+  -0.0608  w=0.004  a:0b1001101001  b:0b1
+  +0.0520  w=0.003  a:0b10000011101  b:0b1
+  +0.0841  w=0.007  a:0b10000101101  b:0b1
+  -0.0673  w=0.005  a:0b10001010101  b:0b1
+  -0.0706  w=0.005  a:0b10001011001  b:0b1
+  +0.1357  w=0.018  a:0b100001000111  b:0b1
+  +0.1260  w=0.016  a:0b100001001011  b:0b1
+  -0.0878  w=0.008  a:0b100001010011  b:0b1
+  -0.2950  w=0.087  a:0b100100001101  b:0b1
+  +0.1158  w=0.013  a:0b100100010101  b:0b1
+  -0.0875  w=0.008  a:0b100100011001  b:0b1
+  +0.0759  w=0.006  a:0b101001000101  b:0b1
+  +0.0715  w=0.005  a:0b101001001001  b:0b1
+  +0.1023  w=0.010  a:0b110000001101  b:0b1
+  -0.1323  w=0.018  a:0b1000000100111  b:0b1
+  -0.1230  w=0.015  a:0b1000000101011  b:0b1
+  +0.0857  w=0.007  a:0b1000000110011  b:0b1
+  +0.2317  w=0.054  a:0b1000100010101  b:0b1
+  +0.2296  w=0.053  a:0b1000100011001  b:0b1
+  -0.0744  w=0.006  a:0b1001000100101  b:0b1
+  -0.0694  w=0.005  a:0b1001000101001  b:0b1
+  -0.0769  w=0.006  a:0b1010000010101  b:0b1
+  -0.0796  w=0.006  a:0b1010000011001  b:0b1
+  +0.1555  w=0.024  a:0b1100000000111  b:0b1
+  +0.1445  w=0.021  a:0b1100000001011  b:0b1
+  -0.1007  w=0.010  a:0b1100000010011  b:0b1
+  -0.0873  w=0.008  a:0b1101000000101  b:0b1
+  -0.0815  w=0.007  a:0b1101000001001  b:0b1
+  +0.0566  w=0.003  a:0b1101000010001  b:0b1
+  [uhf_cas] warm seed (E_prev=-473.55049942)
+/home/kashpur/miniconda3/envs/pyscf/lib/python3.12/site-packages/pyscf/gto/mole.py:1289: UserWarning: Function mol.dumps drops attribute U because it is not JSON-serializable
+  warnings.warn(msg)
+converged SCF energy = -473.550499416063  <S^2> = 6.237232  2S+1 = 5.094009
+  per-l raw: {'s': 5.88, 'p': 12.0, 'd': 11.12, 'f': 3.0} 
+  valence  : {'s': 1.88, 'd': 1.12, 'f': 3.0}
+  frontier gap: 2.3e-01/2.0e-01
+  [uks_pbe_cas] warm seed (E_prev=-475.21374753)
+radial grids: 
+    Treutler-Ahlrichs [JCP 102, 346 (1995); DOI:10.1063/1.469408] (M4) radial grids
+    
+becke partition: Becke, JCP 88, 2547 (1988); DOI:10.1063/1.454033
+pruning grids: <function nwchem_prune at 0x7575acd2ae80>
+grids dens level: 3
+symmetrized grids: False
+atomic radii adjust function: <function treutler_atomic_radii_adjust at 0x7575acd2ade0>
+tot grids = 24384
+/home/kashpur/miniconda3/envs/pyscf/lib/python3.12/site-packages/pyscf/gto/mole.py:1289: UserWarning: Function mol.dumps drops attribute U because it is not JSON-serializable
+  warnings.warn(msg)
+SCF not converged.
+SCF energy = -475.213747451073 after 3 cycles  <S^2> = 6.0091806  2S+1 = 5.0036709
+
+WARN: Newton solver expects mo_coeff with mo_occ as initial guess but mo_occ is not found in the arguments.
+      The given argument is treated as density matrix.
+
+radial grids: 
+    Treutler-Ahlrichs [JCP 102, 346 (1995); DOI:10.1063/1.469408] (M4) radial grids
+    
+becke partition: Becke, JCP 88, 2547 (1988); DOI:10.1063/1.454033
+pruning grids: <function nwchem_prune at 0x7575acd2ae80>
+grids dens level: 3
+symmetrized grids: False
+atomic radii adjust function: <function treutler_atomic_radii_adjust at 0x7575acd2ade0>
+/home/kashpur/miniconda3/envs/pyscf/lib/python3.12/site-packages/pyscf/gto/mole.py:1289: UserWarning: Function mol.dumps drops attribute U because it is not JSON-serializable
+  warnings.warn(msg)
+converged SCF energy = -475.213747532665  <S^2> = 6.0091793  2S+1 = 5.0036704
+  per-l raw: {'s': 6.0, 'p': 12.0, 'd': 10.36, 'f': 3.64} 
+  valence  : {'s': 2.0, 'd': 0.36, 'f': 3.64}
+  frontier gap: 1.3e-02/8.2e-02
+  [uks_pbe_cas_soscf] warm seed (E_prev=-475.21372812)
+
+WARN: Newton solver expects mo_coeff with mo_occ as initial guess but mo_occ is not found in the arguments.
+      The given argument is treated as density matrix.
+
+radial grids: 
+    Treutler-Ahlrichs [JCP 102, 346 (1995); DOI:10.1063/1.469408] (M4) radial grids
+    
+becke partition: Becke, JCP 88, 2547 (1988); DOI:10.1063/1.454033
+pruning grids: <function nwchem_prune at 0x7575acd2ae80>
+grids dens level: 3
+symmetrized grids: False
+atomic radii adjust function: <function treutler_atomic_radii_adjust at 0x7575acd2ade0>
+tot grids = 24384
+/home/kashpur/miniconda3/envs/pyscf/lib/python3.12/site-packages/pyscf/gto/mole.py:1289: UserWarning: Function mol.dumps drops attribute U because it is not JSON-serializable
+  warnings.warn(msg)
+converged SCF energy = -475.213728115126  <S^2> = 6.0095123  2S+1 = 5.0038035
+  per-l raw: {'s': 6.0, 'p': 12.0, 'd': 10.36, 'f': 3.64} 
+  valence  : {'s': 2.0, 'd': 0.36, 'f': 3.64}
+  frontier gap: 1.3e-02/8.2e-02
+  [uks_pbe_uhf_cas] warm seed (E_prev=-475.21371591)
+radial grids: 
+    Treutler-Ahlrichs [JCP 102, 346 (1995); DOI:10.1063/1.469408] (M4) radial grids
+    
+becke partition: Becke, JCP 88, 2547 (1988); DOI:10.1063/1.454033
+pruning grids: <function nwchem_prune at 0x7575acd2ae80>
+grids dens level: 3
+symmetrized grids: False
+atomic radii adjust function: <function treutler_atomic_radii_adjust at 0x7575acd2ade0>
+tot grids = 24384
+/home/kashpur/miniconda3/envs/pyscf/lib/python3.12/site-packages/pyscf/gto/mole.py:1289: UserWarning: Function mol.dumps drops attribute U because it is not JSON-serializable
+  warnings.warn(msg)
+converged SCF energy = -475.213715905207  <S^2> = 6.0090511  2S+1 = 5.0036191
+  per-l raw: {'s': 6.0, 'p': 12.0, 'd': 10.36, 'f': 3.65} 
+  valence  : {'s': 2.0, 'd': 0.36, 'f': 3.65}
+  frontier gap: 1.3e-02/8.2e-02
+  [uks_pbe_uhf_cas_soscf] warm seed (E_prev=-475.21371610)
+
+WARN: Newton solver expects mo_coeff with mo_occ as initial guess but mo_occ is not found in the arguments.
+      The given argument is treated as density matrix.
+
+radial grids: 
+    Treutler-Ahlrichs [JCP 102, 346 (1995); DOI:10.1063/1.469408] (M4) radial grids
+    
+becke partition: Becke, JCP 88, 2547 (1988); DOI:10.1063/1.454033
+pruning grids: <function nwchem_prune at 0x7575acd2ae80>
+grids dens level: 3
+symmetrized grids: False
+atomic radii adjust function: <function treutler_atomic_radii_adjust at 0x7575acd2ade0>
+tot grids = 24384
+/home/kashpur/miniconda3/envs/pyscf/lib/python3.12/site-packages/pyscf/gto/mole.py:1289: UserWarning: Function mol.dumps drops attribute U because it is not JSON-serializable
+  warnings.warn(msg)
+converged SCF energy = -475.213716100336  <S^2> = 6.0090902  2S+1 = 5.0036348
+  per-l raw: {'s': 6.0, 'p': 12.0, 'd': 10.36, 'f': 3.64} 
+  valence  : {'s': 2.0, 'd': 0.36, 'f': 3.64}
+  frontier gap: 1.3e-02/8.2e-02
+
+==================== final comparison ====================
+method                      conv                 iterations                tolerance            E, Eh    dE,mEh          E,eV    dE,eV   <S^2>   <Sz>  match  configuration                  note
+ROHF                           ✔                 DIIS 1 cyc                g 2.4e-06    -473.54496952    +55.75   -12885.8151   +1.517   6.000   2.00      ✔  s^1.98 d^1.02 f^3.00           warm verify; stationary: dE_vs_chk 4.5e-10
+ROHF-smear*                    ✔               SMEAR 27 cyc    dE 3.4e-10, g 1.4e-07    -472.65491220   +945.81   -12861.5954  +25.737   0.000    n/a      ✘  s^2.01 p^0.17 d^1.90 f^1.92    gaussian smear sigma=0.02
+UHF                            ✔                 DIIS 1 cyc                g 1.0e-06    -473.48831714   +112.41   -12884.2735   +3.059   6.006   2.00      ✘  s^2.00 f^4.00                  warm verify; stationary: dE_vs_chk 1.0e-12
+UHF-smear*                     ✔               SMEAR 24 cyc    dE 5.4e-10, g 5.4e-07    -472.65491219   +945.81   -12861.5954  +25.737  -0.000   0.00      ✘  s^2.01 p^0.17 d^1.90 f^1.92    gaussian smear sigma=0.02
+UKS-PBE                        ✔                 DIIS 1 cyc                g 1.1e-05    -475.21375587  -1613.03   -12931.2251  -43.893   6.009   2.00      ✘  s^2.00 d^0.36 f^3.64           warm verify; stationary: dE_vs_chk 7.6e-10
+UKS-PBE-smear*                 ✔               SMEAR 14 cyc    dE 8.5e-10, g 1.3e-07    -475.08960639  -1488.88   -12927.8468  -40.515  -0.000   0.00      ✘  s^1.64 p^0.12 d^1.04 f^3.20    gaussian smear sigma=0.02
+UKS-PBE-smear-fs*              ✔             SMEARFS 14 cyc    dE 7.4e-12, g 1.8e-07    -475.13228433  -1531.56   -12929.0081  -41.676   0.005   2.00      ✘  s^1.51 p^0.13 d^1.12 f^3.24    gaussian smear sigma=0.02, fix_spin
+CASCI                          ✔                          —                        —    -473.55617357    +44.55   -12886.1199   +1.212   6.000   2.00      ✔  s^1.91 p^0.05 d^1.04 f^3.00    frozen seed-row MOs
+CASSCF                         ✔             casscf 4 macro    dE 1.0e-09, g 1.7e-06    -473.60072282     +0.00   -12887.3322   +0.000   6.000   2.00      ✔  s^1.84 p^0.13 d^1.04 f^2.99    CAS(6,13) from seed-row MOs; w_max=0.17; dom class s^1 d^1 f^3; relax gain +0.0445
+UHF<-CAS                       ✔                 DIIS 1 cyc                g 1.2e-06    -473.55049942    +50.22   -12885.9655   +1.367   6.237   2.00      ✔  s^1.88 d^1.12 f^3.00           warm verify; stationary: dE_vs_chk 4.8e-12; dE vs ROHF -5.53e-03 (polarized core if cfg matches)
+UKS-PBE<-CAS                   ✔ DIIS 3 cyc + SOSCF 2 macro    dE 0.0e+00, g 8.4e-06    -475.21374753  -1613.02   -12931.2248  -43.893   6.009   2.00      ✘  s^2.00 d^0.36 f^3.64           warm verify; stationary: dE_vs_chk 2.6e-09
+UKS-PBE<-CAS-SOSCF             ✔              SOSCF 2 macro    dE 0.0e+00, g 6.4e-06    -475.21372812  -1613.01   -12931.2243  -43.892   6.010   2.00      ✘  s^2.00 d^0.36 f^3.64           warm verify; stationary: dE_vs_chk 2.9e-11
+UKS-PBE<-UHF<-CAS              ✔                 DIIS 1 cyc                g 1.2e-05    -475.21371591  -1612.99   -12931.2240  -43.892   6.009   2.00      ✘  s^2.00 d^0.36 f^3.65           warm verify; stationary: dE_vs_chk 1.3e-09
+UKS-PBE<-UHF<-CAS-SOSCF        ✔              SOSCF 1 macro    dE 0.0e+00, g 1.9e-05    -475.21371610  -1612.99   -12931.2240  -43.892   6.009   2.00      ✘  s^2.00 d^0.36 f^3.64           warm verify; stationary: dE_vs_chk 1.7e-10
+
+markdown table written to results.md
+  * = a SMEAR stage in the strategy (see note); dE vs CASSCF is
+  comparable only among HF-based rows; frontier gaps are printed
+  per row in the run log.
+  the UHF 5f^4 6d^0 collapse: integer occupations cannot hold the
+  5f/6d-degenerate frontier — the very reason the CAS is needed.

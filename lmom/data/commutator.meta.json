@@ -1,0 +1,12 @@
+{
+ "U sph-CASCI(6,13) [green]": 4.1937172425301693e-13,
+ "U CAS(6,16) [green]": 3.1892057465759206e-13,
+ "U ss [broken]": 0.08077593546498642,
+ "U SA-13 [broken]": 0.045424883964601245,
+ "Si sto-3g sph [green]": 1.0047083063890588e-15,
+ "Si def2-tzvp sph [green]": 2.6043014282944577e-14,
+ "Sc sto-3g sph [green]": 7.691109386094367e-16,
+ "Sc def2-tzvp sph [green]": 2.8229837326825263e-15,
+ "Ti sto-3g sph [green]": 3.126709826166776e-15,
+ "Ti def2-tzvp sph [green]": 1.1487786110333304e-14
+}

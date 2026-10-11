@@ -1,0 +1,17 @@
+{
+ "system": "u14e_verify",
+ "trace": {
+  "analytic": 635778.0000000005,
+  "from_eig": 635778.0000000003,
+  "dev": 1.1641532182693481e-10
+ },
+ "trace2": {
+  "frobenius": 37038996.00000006,
+  "from_eig": 37038996.000000075,
+  "dev": 1.4901161193847656e-08
+ },
+ "full_spectrum_max_int_dev": 3.694822225952521e-12,
+ "stored_ladder_dev": 5.7123813235193666e-08,
+ "soc_nist_note": "LS terms vs J-resolved NIST levels: compare via centers of gravity",
+ "verdict": "PASS"
+}

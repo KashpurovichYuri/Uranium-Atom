@@ -1,0 +1,102 @@
+U atom ground state (5f^3 6d^1 7s^2, quintet) with a 32-electron GRECP:
+ROHF/UHF/UKS vs CASSCF(6,13)
+========================================================================
+
+System
+------
+Uranium atom; 60 inner electrons (1s-4f) replaced by a generalized
+relativistic effective core potential (GRECP); the 32 explicit electrons
+are the closed subvalence 5s^2 5p^6 5d^10 6s^2 6p^6 plus the open shell
+5f^3 6d^1 7s^2. Quintet multiplicity (S = 2, <S^2> = 6). Basis:
+uncontracted 15s13p10d9f (loosely based on dyall.ae4z). All wavefunction
+methods here (ROHF, UHF, UKS, CASSCF) are scalar and spin-free: the
+Hamiltonian contains overlap, kinetic, nuclear attraction and the
+spin-independent (scalar) GRECP part, all from libgrpp and verified
+against PySCF's native ECP implementation (max 2.4e-11). The spin-orbit
+GRECP block is likewise verified (5e-13) but does not enter these
+calculations.
+
+Procedure
+---------
+1. Single references. ROHF, UHF, UKS(PBE) and smeared variants — Gaussian
+   fractional occupations (sigma = 0.02 Eh) at the near-degenerate
+   frontier followed by an integer restart. Solver strategy: DIIS with a
+   second-order (SOSCF) fallback, tolerance 1e-9 Eh.
+
+2. Active space. Frontier rule on ROHF orbitals: the 6 valence electrons
+   gathered from the top of the occupied spectrum (7s, 5f x3, 6d),
+   completed by the lowest-energy virtuals; the CAS(6,13) composition is
+   s^2 p^5 d^3 f^3 — correlating 7p and a second s enter alongside
+   5f/6d/7s.
+
+3. CASCI pre-flight (frozen ROHF orbitals): E = -473.556174 Eh.
+
+4. CASSCF(6,13), state-specific quintet (5 alpha, 1 beta active
+   electrons): E = -473.600723 Eh, <S^2> = 6.000 — 44.5 mEh below CASCI
+   (orbital relaxation) and 55.8 mEh (1.52 eV) below ROHF.
+
+5. Restarts from CASSCF. UHF/UKS are seeded with a density matrix built
+   from the CASSCF natural orbitals and NOON-ranked binary spin
+   occupations (beta fills the 14 largest NOONs, alpha the 18 largest;
+   the 4 unpaired-alpha pattern emerges from the ranking). The
+   construction is a guess convention only — the kernel re-derives
+   integer occupations each cycle, and the SCF trajectory depends on the
+   guess solely through dm0; an equivalent alternative is feeding the raw
+   spin-resolved CASSCF density (mc.make_rdm1s()) directly. Natural
+   orbitals are thus not required for the calculation — they are the
+   canonical frame in which occupations exist, serving both the
+   spin-assignment rule and the analysis below. This design separates
+   "correct orbitals, single determinant/DFN" from "correlated orbital
+   optimization".
+
+Analysis tools
+--------------
+- Shell populations / MO characters. Coefficients are taken in the
+  symmetrically orthogonalized AO frame (S^1/2), where squared
+  coefficients exactly partition the norm; for an atom the l-blocks stay
+  pure, giving each MO an angular-momentum character and each shell an
+  electron count (closed subvalence subtracted) — the
+  valence-configuration fingerprint tested against the 5f^3 6d^1 7s^2
+  target.
+
+- Natural orbitals. For a multi-determinant wavefunction, per-orbital
+  occupations exist only in the natural-orbital frame (diagonal 1-RDM):
+  NOONs give the invariant "averaged" picture, e.g. CASSCF
+  s^1.84 p^0.13 d^1.04 f^2.99 — soft values are ensemble averages over
+  the CI expansion.
+
+- Configuration weights (from the CASSCF CI vector; CASCI serves only as
+  pre-flight). Determinants (bit j of the CI string = active orbital j,
+  l-labels assigned from orbital characters) are grouped into classes;
+  weights are sums of |c|^2 over the normalized expansion: s^1 d^1 f^3 =
+  0.53, s^1 p^1 d^1 f^2 = 0.28, s^1 p^2 d^1 f^1 = 0.04 (86% of the
+  wavefunction above the 0.05 cutoff); the beta electron stays in 7s
+  throughout. The largest single determinant (s^1 d^1 f^3 alpha + 7s^1
+  beta) carries only 0.17: within one configuration the weight is spread
+  over many determinants (degenerate m-orbital patterns of the
+  Hund-coupled term) — the multi-determinantal signature, not a
+  normalization effect.
+
+Results (Eh)
+------------
+method                     E            <S^2>  valence config               target match
+ROHF                       -473.544970  6.000  s^2 d^1 f^3                  yes
+UHF                        -473.488317  6.006  s^2 f^4                      no (6d->5f collapse)
+UKS-PBE                    -475.213756  6.009  s^2 d^0.36 f^3.64            no (d-f mixture)
+CASSCF                     -473.600723  6.000  s^1.84 p^0.13 d^1.04 f^2.99  yes
+UHF<-CAS                   -473.550499  6.237  s^1.88 d^1.12 f^3            yes
+UKS<-CAS (4 routes)        -475.213716  6.009  s^2 d^0.36 f^3.65            no
+
+Conclusions
+-----------
+(i) UHF with integer occupations collapses the frontier to 5f^4 6d^0 —
+the atomic configuration cannot be held at single-reference SCF level;
+(ii) CASSCF restores the correct quintet 55.8 mEh below ROHF with
+<S^2> = 6.000 and no dominant determinant — static correlation is
+essential and quantified; (iii) UHF on the CASSCF orbitals preserves the
+configuration and gains -5.5 mEh of core polarization, yet stays 50 mEh
+above CASSCF — the static-correlation remainder missing from any single
+determinant; (iv) all UKS restart routes converge to one PBE solution,
+comparable only among DFT rows. Every solution was re-certified
+stationary on warm restart (dE <= 2e-9 Eh); the pipeline re-verifies
+from chk files in ~10 min.

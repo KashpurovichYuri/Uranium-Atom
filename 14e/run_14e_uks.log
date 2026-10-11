@@ -1,0 +1,397 @@
+#INFO: **** input file is /home/kashpur/pylibgrpp/test/uranium/14e/run_14e.py ****
+"""
+run_14e.py — U atom with the Stuttgart RLC ECP (78 core electrons).
+
+14 explicit electrons: 6s^2 6p^6 (closed subvalence) + 5f^3 6d^1 7s^2
+(quintet valence). Plain PySCF ECP (no GRPP). Pipeline (4 rows):
+  ROHF -> CASCI pre-flight -> CASSCF(6,13) -> ROHF<-CAS,
+plus the frozen-orbital multi-root spectroscopic scan.
+
+Active space: subshell-completion pick -> 1x7s + 5x6d + 7x5f = CAS(6,13),
+SO(3)-complete (required for exact L^2 spectroscopy once the full-space
+L^2 implementation lands).
+"""
+import os, sys
+import numpy as np
+from pyscf import gto
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import uranium_pipeline as up
+
+STUTTGART_RLC_ECP78 = '''
+ECP
+U nelec 78
+U ul
+2       1.000000000            0.000000000
+U S
+2       4.063653000          112.920103000
+2       1.883995000           15.647500000
+2       0.886567000           -3.689971000
+U P
+2       3.986181000          118.758016000
+2       2.000160000           15.077228000
+2       0.960841000            0.556720000
+U D
+2       4.147972000           60.855892000
+2       2.234563000           29.280047000
+2       0.913695000            4.998029000
+U F
+2       3.998938000           49.924035000
+2       1.998840000          -24.674042000
+2       0.995641000            1.389480000
+U G
+2       3.817422000          -36.040977000
+2       0.262501000           -0.090511000
+END
+'''
+
+BASIS = {'U': gto.parse('''
+    U S
+        3.09793695E+01  1.0
+    U S
+        1.93389862E+01  1.0
+    U S
+        1.19091789E+01  1.0
+    U S
+        7.28108692E+00  1.0
+    U S
+        4.52381555E+00  1.0
+    U S
+        2.69147870E+00  1.0
+    U S
+        1.62933419E+00  1.0
+    U S
+        1.02810670E+00  1.0
+    U S
+        6.05884393E-01  1.0
+    U S
+        3.55646976E-01  1.0
+    U S
+        2.01800187E-01  1.0
+    U S
+        1.24813560E-01  1.0
+    U S
+        6.38361554E-02  1.0
+    U S
+        3.29899773E-02  1.0
+    U S
+        1.68638039E-02  1.0
+    U P
+        4.17040704E+01  1.0
+    U P
+        2.47028799E+01  1.0
+    U P
+        1.44963977E+01  1.0
+    U P
+        8.57586995E+00  1.0
+    U P
+        4.98086081E+00  1.0
+    U P
+        2.84040828E+00  1.0
+    U P
+        1.59903715E+00  1.0
+    U P
+        8.64765972E-01  1.0
+    U P
+        4.57242055E-01  1.0
+    U P
+        2.38933519E-01  1.0
+    U P
+        1.18792999E-01  1.0
+    U P
+        5.70066185E-02  1.0
+    U P
+        2.69891792E-02  1.0
+    U P
+        1.27490309E-02  1.0
+    U D
+        1.38063993E+01  1.0
+    U D
+        8.06231666E+00  1.0
+    U D
+        4.66375400E+00  1.0
+    U D
+        2.63565039E+00  1.0
+    U D
+        1.45796002E+00  1.0
+    U D
+        7.74812159E-01  1.0
+    U D
+        3.72484724E-01  1.0
+    U D
+        1.71955342E-01  1.0
+    U D
+        7.61336090E-02  1.0
+    U D
+        3.20319168E-02  1.0
+    U F
+        3.68446566E+01  1.0
+    U F
+        1.98480492E+01  1.0
+    U F
+        1.07216853E+01  1.0
+    U F
+        5.70450122E+00  1.0
+    U F
+        2.92433437E+00  1.0
+    U F
+        1.43960404E+00  1.0
+    U F
+        6.73859301E-01  1.0
+    U F
+        2.94349701E-01  1.0
+    U F
+        1.13239850E-01  1.0
+    U F
+        5.45732520E-02  1.0
+    ''')}
+
+if __name__ == '__main__':
+    up.configure(
+        ECP_KIND='std',
+        ATOM='U 0 0 0',
+        UNIT='B', CHARGE=0, SPIN=4,
+        BASIS=BASIS,
+        ECP={'U': STUTTGART_RLC_ECP78},
+        CORE_MAP={0: 2, 1: 6},           # closed 6s^2 6p^6
+        NELECAS=(5, 1), NCAS=13,
+        CAS_MULTIPLETS={'s': 1, 'd': 5, 'f': 7},
+        TARGET_CFG={'s': 2.0, 'd': 1.0, 'f': 3.0},
+        STAGE1=[('ROHF', 'ROHF', ('DIIS', 'SOSCF')),
+                ('UKS-PBE', 'UKS', ('DIIS', 'SOSCF'))],
+        STAGE2_SEED='rohf',
+        STAGE3=[('ROHF<-CAS', 'ROHF', 'casscf', ('DIIS', 'SOSCF')),
+                ('UKS-PBE<-CAS', 'UKS', 'casscf', ('DIIS', 'SOSCF'))],
+        ROOT_SECTORS=[((5, 1), 20), ((6, 0), 6)],
+        SPECTROSCOPY=True,
+        FORCE_COLD_CAS=False,
+    )
+    up.main()
+#INFO: ******************** input file end ********************
+
+
+System: uname_result(system='Linux', node='irbis', release='7.0.0-30-generic', version='#30~24.04.1-Ubuntu SMP PREEMPT_DYNAMIC Fri Aug  7 13:27:52 UTC 2', machine='x86_64')  Threads 128
+Python 3.12.13 | packaged by Anaconda, Inc. | (main, Mar 19 2026, 20:20:58) [GCC 14.3.0]
+numpy 2.5.1  scipy 1.18.0  h5py 3.16.0
+Date: Tue Oct  6 14:15:11 2026
+PySCF version 2.13.1
+PySCF path  /home/kashpur/miniconda3/envs/pyscf/lib/python3.12/site-packages/pyscf
+
+[CONFIG] conf_file None
+[INPUT] verbose = 4
+[INPUT] num. atoms = 1
+[INPUT] num. electrons = 14
+[INPUT] charge = 0
+[INPUT] spin (= nelec alpha-beta = 2S) = 4
+[INPUT] symmetry False subgroup None
+[INPUT] Mole.unit = B
+[INPUT] Symbol           X                Y                Z      unit          X                Y                Z       unit  Magmom
+[INPUT]  1 U      0.000000000000   0.000000000000   0.000000000000 AA    0.000000000000   0.000000000000   0.000000000000 Bohr   0.0
+
+nuclear repulsion = 0
+number of shells = 49
+number of NR pGTOs = 177
+number of NR cGTOs = 177
+basis = {'U': [[0, [30.9793695, 1.0]], [0, [19.3389862, 1.0]], [0, [11.9091789, 1.0]], [0, [7.28108692, 1.0]], [0, [4.52381555, 1.0]], [0, [2.6914787, 1.0]], [0, [1.62933419, 1.0]], [0, [1.0281067, 1.0]], [0, [0.605884393, 1.0]], [0, [0.355646976, 1.0]], [0, [0.201800187, 1.0]], [0, [0.12481356, 1.0]], [0, [0.0638361554, 1.0]], [0, [0.0329899773, 1.0]], [0, [0.0168638039, 1.0]], [1, [41.7040704, 1.0]], [1, [24.7028799, 1.0]], [1, [14.4963977, 1.0]], [1, [8.57586995, 1.0]], [1, [4.98086081, 1.0]], [1, [2.84040828, 1.0]], [1, [1.59903715, 1.0]], [1, [0.864765972, 1.0]], [1, [0.457242055, 1.0]], [1, [0.238933519, 1.0]], [1, [0.118792999, 1.0]], [1, [0.0570066185, 1.0]], [1, [0.0269891792, 1.0]], [1, [0.0127490309, 1.0]], [2, [13.8063993, 1.0]], [2, [8.06231666, 1.0]], [2, [4.663754, 1.0]], [2, [2.63565039, 1.0]], [2, [1.45796002, 1.0]], [2, [0.774812159, 1.0]], [2, [0.372484724, 1.0]], [2, [0.171955342, 1.0]], [2, [0.076133609, 1.0]], [2, [0.0320319168, 1.0]], [3, [36.8446566, 1.0]], [3, [19.8480492, 1.0]], [3, [10.7216853, 1.0]], [3, [5.70450122, 1.0]], [3, [2.92433437, 1.0]], [3, [1.43960404, 1.0]], [3, [0.673859301, 1.0]], [3, [0.294349701, 1.0]], [3, [0.11323985, 1.0]], [3, [0.054573252, 1.0]]]}
+ecp = {'U': '\nECP\nU nelec 78\nU ul\n2       1.000000000            0.000000000\nU S\n2       4.063653000          112.920103000\n2       1.883995000           15.647500000\n2       0.886567000           -3.689971000\nU P\n2       3.986181000          118.758016000\n2       2.000160000           15.077228000\n2       0.960841000            0.556720000\nU D\n2       4.147972000           60.855892000\n2       2.234563000           29.280047000\n2       0.913695000            4.998029000\nU F\n2       3.998938000           49.924035000\n2       1.998840000          -24.674042000\n2       0.995641000            1.389480000\nU G\n2       3.817422000          -36.040977000\n2       0.262501000           -0.090511000\nEND\n'}
+CPU time:        13.98
+  [rohf] warm seed (E_prev=-50.38185233)
+converged SCF energy = -50.3818523316553
+  per-l raw: {'s': 3.99, 'p': 6.0, 'd': 1.01, 'f': 3.0} 
+  valence  : {'s': 1.99, 'd': 1.01, 'f': 3.0}
+radial grids: 
+    Treutler-Ahlrichs [JCP 102, 346 (1995); DOI:10.1063/1.469408] (M4) radial grids
+    
+becke partition: Becke, JCP 88, 2547 (1988); DOI:10.1063/1.454033
+pruning grids: <function nwchem_prune at 0x7670d0a83100>
+grids dens level: 3
+symmetrized grids: False
+atomic radii adjust function: <function treutler_atomic_radii_adjust at 0x7670d0a83060>
+tot grids = 24384
+SCF not converged.
+SCF energy = -51.4956322384177 after 100 cycles  <S^2> = 6.0091818  2S+1 = 5.0036714
+radial grids: 
+    Treutler-Ahlrichs [JCP 102, 346 (1995); DOI:10.1063/1.469408] (M4) radial grids
+    
+becke partition: Becke, JCP 88, 2547 (1988); DOI:10.1063/1.454033
+pruning grids: <function nwchem_prune at 0x7670d0a83100>
+grids dens level: 3
+symmetrized grids: False
+atomic radii adjust function: <function treutler_atomic_radii_adjust at 0x7670d0a83060>
+converged SCF energy = -51.4956322657684  <S^2> = 6.0091817  2S+1 = 5.0036713
+  per-l raw: {'s': 4.0, 'p': 6.0, 'f': 4.0} 
+  valence  : {'s': 2.0, 'f': 4.0}
+
+--- CAS picks (1-based) ---
+  MO   5  occ=2.0  e=-0.1983  char=s  purity=0.99
+  MO   6  occ=1.0  e=-0.0309  char=d  purity=0.99
+  MO   7  occ=1.0  e=-0.0184  char=f  purity=1.00
+  MO   8  occ=1.0  e=-0.0139  char=f  purity=1.00
+  MO   9  occ=1.0  e=-0.0127  char=f  purity=1.00
+  MO  14  occ=0.0  e=+0.0572  char=d  purity=1.00
+  MO  15  occ=0.0  e=+0.0572  char=d  purity=1.00
+  MO  19  occ=0.0  e=+0.0640  char=d  purity=1.00
+  MO  20  occ=0.0  e=+0.0643  char=d  purity=1.00
+  MO  27  occ=0.0  e=+0.1931  char=f  purity=1.00
+  MO  28  occ=0.0  e=+0.1931  char=f  purity=0.68
+  MO  29  occ=0.0  e=+0.1941  char=f  purity=0.99
+  MO  30  occ=0.0  e=+0.1944  char=f  purity=1.00
+  CAS composition: s^1 d^5 f^7
+
+CAS candidate (1-based): [5, 6, 7, 8, 9, 14, 15, 19, 20, 27, 28, 29, 30]
+<class 'pyscf.mcscf.casci.CASCI'> does not have attributes  callback
+CASCI E = -50.3878400259905  E(CI) = -6.76392046667805  S^2 = 6.0000000
+  per-l raw: {'s': 3.94, 'p': 6.0, 'd': 1.06, 'f': 3.0} 
+  valence  : {'s': 1.94, 'd': 1.06, 'f': 3.0}
+
+** CASSCF reference: ROHF  E=-50.38185233 **
+  [casscf] warm seed (E_prev=-50.439933015717855)
+
+******** <class 'pyscf.mcscf.mc1step.CASSCF'> ********
+CAS (5e+1e, 13o), ncore = 4, nvir = 160
+max_cycle_macro = 6
+max_cycle_micro = 4
+conv_tol = 1e-09
+conv_tol_grad = None
+orbital rotation max_stepsize = 0.02
+orbital rotation threshold for CI restart = 0.01
+augmented hessian ah_max_cycle = 30
+augmented hessian ah_conv_tol = 1e-12
+augmented hessian ah_linear dependence = 1e-14
+augmented hessian ah_level shift = 1e-08
+augmented hessian ah_start_tol = 2.5
+augmented hessian ah_start_cycle = 3
+augmented hessian ah_grad_trust_region = 3
+kf_trust_region = 3
+kf_interval = 4
+ci_response_space = 4
+ci_grad_trust_region = 3
+with_dep4 0
+natorb = False
+canonicalization = True
+sorting_mo_energy = False
+ao2mo_level = 2
+chkfile = casscf.chk
+max_memory 4000 MB (current use 3134 MB)
+internal_rotation = False
+******** <class 'pyscf.fci.direct_spin1.FCISolver'> ********
+max. cycles = 50
+conv_tol = 1e-08
+davidson only = False
+linear dependence = 1e-12
+level shift = 0.001
+max iter space = 12
+max_memory 4000 MB
+nroots = 1
+pspace_size = 400
+spin = None
+CASCI E = -50.4399330152198  S^2 = 6.0000000
+Set conv_tol_grad to 3.16228e-05
+macro iter   1 ( 11 JK    1 micro), CASSCF E = -50.4399330167933  dE = -1.57348268e-09  S^2 = 6.0000000
+               |grad[o]|=6.85e-06  |grad[c]|=2.14e-05  |ddm|=3.02e-16  |maxRot[o]|=0.000114
+macro iter   2 (  6 JK    1 micro), CASSCF E = -50.4399330175974  dE = -8.04092792e-10  S^2 = 6.0000000
+               |grad[o]|=4.04e-06  |grad[c]|=1.51e-05  |ddm|=4.26e-16  |maxRot[o]|=6.34e-05
+1-step CASSCF converged in   2 macro ( 17 JK   2 micro) steps
+CASSCF canonicalization
+Density matrix diagonal elements [1.83463803 0.46023627 0.95198424 0.61672881 0.96134257 0.12458164
+ 0.05026594 0.24238722 0.05369692 0.05863347 0.04083111 0.23694558
+ 0.36772821]
+CASSCF energy = -50.4399330175974
+CASCI E = -50.4399330175974  E(CI) = -6.80326115718921  S^2 = 6.0000000
+  [casscf] stationarity: E - E_chk = -1.88e-09
+  per-l raw: {'s': 3.85, 'p': 6.12, 'd': 1.07, 'f': 2.96} 
+  valence  : {'s': 1.85, 'p': 0.12, 'd': 1.07, 'f': 2.96}
+
+E(CASSCF) = -50.43993302   <S^2> = 6.0000
+CASSCF NOONs: [-0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.
+ -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.
+ -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.
+ -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.
+ -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.
+ -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.
+ -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.
+ -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.
+ -0.    -0.    -0.     0.     0.     0.     0.     0.     0.     0.
+  0.     0.     0.     0.     0.     0.     0.     0.     0.     0.
+  0.     0.     0.     0.     0.     0.     0.     0.     0.     0.
+  0.     0.     0.     0.     0.     0.     0.     0.     0.     0.
+  0.     0.     0.     0.     0.     0.     0.     0.     0.     0.
+  0.     0.     0.     0.     0.     0.     0.     0.     0.     0.
+  0.     0.     0.     0.     0.     0.     0.     0.     0.     0.
+  0.     0.     0.     0.     0.     0.     0.     0.     0.     0.
+  0.023  0.023  0.035  0.04   0.04   0.041  0.408  0.412  0.581  0.588
+  0.98   0.981  1.85   2.     2.     2.     2.   ]
+  active-orbital l-map: s d f f f d d d d p p p f
+configuration histogram (alpha classes, |c| > cutoff):
+   s^1 d^1 f^3       sum_w = 0.668
+   s^1 p^1 f^3       sum_w = 0.150
+   s^1 p^1 d^1 f^2   sum_w = 0.054
+   p^1 d^1 f^3       sum_w = 0.010
+   d^2 f^3           sum_w = 0.003
+   listed total = 0.885  beta strings: {'0b10', '0b1', '0b1000000000', '0b10000000000', '0b100000'}
+
+========================= SPECTROSCOPIC SCAN (frozen seed-row MOs) =========================
+
+--- sector (na, nb) = (5, 1)  (20 roots) ---
+root             E, Eh     dE, eV    dE, cm^-1    <S^2>
+-------------------------------------------------------
+0         -50.38784003     +0.000         +0.0    6.000
+1         -50.33449935     +1.451     +11706.9   12.000
+2         -50.33423253     +1.459     +11765.5   12.000
+3         -50.31917360     +1.869     +15070.5    6.000
+4         -50.31877777     +1.879     +15157.4    6.000
+5         -50.31507692     +1.980     +15969.7   12.000
+6         -50.31334372     +2.027     +16350.1   12.000
+7         -50.30241351     +2.325     +18749.0    6.000
+8         -50.30078642     +2.369     +19106.1    6.000
+9         -50.29778542     +2.451     +19764.7    6.000
+10        -50.29743736     +2.460     +19841.1    6.000
+11        -50.28831242     +2.708     +21843.8    6.000
+12        -50.28760466     +2.728     +21999.1    6.000
+13        -50.28311584     +2.850     +22984.3    6.000
+14        -50.28272920     +2.860     +23069.2    6.000
+15        -50.27366025     +3.107     +25059.6    6.000
+16        -50.27275957     +3.131     +25257.2    6.000
+17        -50.26431999     +3.361     +27109.5    6.000
+18        -50.25342967     +3.657     +29499.7    6.000
+19        -50.25176697     +3.703     +29864.6    6.000
+
+--- sector (na, nb) = (6, 0)  (6 roots) ---
+root             E, Eh     dE, eV    dE, cm^-1    <S^2>
+-------------------------------------------------------
+0         -50.33449935     +1.451     +11706.9   12.000
+1         -50.33423253     +1.459     +11765.5   12.000
+2         -50.31507692     +1.980     +15969.7   12.000
+3         -50.31334372     +2.027     +16350.0   12.000
+4         -50.23837431     +4.067     +32803.9   12.000
+5         -50.23391066     +4.189     +33783.6   12.000
+  (L^2 per root: pending the full-space L^2 implementation)
+  [rohf_cas] warm seed (E_prev=-50.38185233)
+converged SCF energy = -50.3818523286446
+  per-l raw: {'s': 3.99, 'p': 6.0, 'd': 1.01, 'f': 3.0} 
+  valence  : {'s': 1.99, 'd': 1.01, 'f': 3.0}
+radial grids: 
+    Treutler-Ahlrichs [JCP 102, 346 (1995); DOI:10.1063/1.469408] (M4) radial grids
+    
+becke partition: Becke, JCP 88, 2547 (1988); DOI:10.1063/1.454033
+pruning grids: <function nwchem_prune at 0x7670d0a83100>
+grids dens level: 3
+symmetrized grids: False
+atomic radii adjust function: <function treutler_atomic_radii_adjust at 0x7670d0a83060>
+tot grids = 24384
+converged SCF energy = -51.5054175197515  <S^2> = 6.0085299  2S+1 = 5.0034108
+  per-l raw: {'s': 4.0, 'p': 6.0, 'f': 4.0} 
+  valence  : {'s': 2.0, 'f': 4.0}
+
+==================== final comparison ====================
+method                      conv                 iterations                tolerance            E, Eh    dE,mEh          E,eV    dE,eV   <S^2>   <Sz>   <L^2>  match  configuration                  note
+ROHF                           ✔                 DIIS 1 cyc                g 4.7e-06     -50.38185233    +58.08    -1370.9600   +1.580   6.000   2.00     n/a      ✔  s^1.99 d^1.01 f^3.00           warm verify; stationary: dE_vs_chk 2.0e-09
+UKS-PBE                        ✔ DIIS 100 cyc + SOSCF 5 macro    dE 0.0e+00, g 6.7e-06     -51.49563227  -1055.70    -1401.2675  -28.727   6.009   2.00     n/a      ✘  s^2.00 f^4.00                  DIIS->SOSCF
+CASCI                          ✔                          —                        —     -50.38784003    +52.09    -1371.1230   +1.418   6.000   2.00     n/a      ✔  s^1.94 d^1.06 f^3.00           frozen seed-row MOs
+CASSCF                         ✔             casscf 2 macro    dE 8.0e-10, g 4.0e-06     -50.43993302     +0.00    -1372.5405   +0.000   6.000   2.00     n/a      ✔  s^1.85 p^0.12 d^1.07 f^2.96    CAS(6,13) from seed-row MOs; dE_vs_chk 1.9e-09
+ROHF<-CAS                      ✔                 DIIS 1 cyc                g 6.4e-06     -50.38185233    +58.08    -1370.9600   +1.580   6.000   2.00     n/a      ✔  s^1.99 d^1.01 f^3.00           warm verify; stationary: dE_vs_chk 5.0e-09
+UKS-PBE<-CAS                   ✔                DIIS 48 cyc    dE 9.4e-10, g 1.1e-05     -51.50541752  -1065.48    -1401.5338  -28.993   6.009   2.00     n/a      ✘  s^2.00 f^4.00                  DIIS->SOSCF
+
+markdown table written to results.md
+  * = a SMEAR stage in the strategy (see note); dE vs CASSCF is
+  comparable only among rows of the same Hamiltonian family.

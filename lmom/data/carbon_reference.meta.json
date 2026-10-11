@@ -1,0 +1,15 @@
+{
+ "system": "C cc-pvdz sph+CASCI(2,3) valence-2p, ncore=2 (1s+2s)",
+ "e_roots": [
+  -37.655040878636214
+ ],
+ "ladder": [
+  1.999999999999999
+ ],
+ "ladder_dev": 1.1102230246251565e-15,
+ "span_invar": 9.367506770274758e-16,
+ "l_closed": true,
+ "terms": {
+  "1": 3
+ }
+}

@@ -1,0 +1,1289 @@
+#INFO: **** input file is /home/kashpur/pylibgrpp/test/uranium/test/test_uranium_atom_32e.py ****
+"""
+Uranium Atom (32e-GRECP) State-Specific & Spectroscopic Pipeline
+================================================================
+Target state: Ground-state quintet 5f^3 6d^1 7s^2 (^5L, S=2, L=8).
+
+Pipeline Architecture:
+  1. stage1_scf: Baseline single-reference benchmarks (ROHF, UHF, UKS-PBE).
+  2. stage2_cas: 
+       - Valence active space selection: CAS(6, 13) = s^1 d^5 f^7 (SO(3)-complete)
+       - Single-root CASCI pre-flight
+       - State-specific CASSCF ground-state optimization with <L^2> and <S^2>
+       - Multi-root spectroscopic scan on relaxed CASSCF orbitals (Quintets & Septets)
+       - Determinant & Configuration State analysis
+  3. stage3_scf: CASSCF-seeded SCF runs to evaluate core polarization.
+  4. report: Consolidated comparison table (terminal output + results.md).
+"""
+
+import os
+import sys
+import time
+import inspect
+from collections import defaultdict
+from types import SimpleNamespace
+import numpy as np
+from scipy.linalg import eigh as _sc_eigh
+from pyscf import gto, scf, dft, mcscf, fci
+from pyscf.mcscf import addons
+from pyscf.scf.smearing import smearing as _smear_fn
+from pyscf.lib import chkfile as lib_chk
+
+# Link libgrpp interface
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..')))
+import libgrpp
+import libgrpp4pyscf
+
+# ==============================================================================
+# CONFIGURATION & CONSTANTS
+# ==============================================================================
+ATOM  = '''U    0.0    0.0    0.0'''
+UNIT, CHARGE, SPIN = 'B', 0, 4    # Quintet: 2 * S = 4 -> S = 2
+NELECAS    = (5, 1)               # Active electrons (alpha, beta) for Quintet
+NCAS       = 13                   # 1 x 7s + 5 x 6d + 7 x 5f = 13 valence orbitals
+TARGET_CFG = {'s': 2.0, 'd': 1.0, 'f': 3.0}
+CFG_TOL, CFG_PRINT_TOL = 0.3, 0.05
+XC, SMEAR_SIGMA = 'pbe', 0.02
+CORE_MAP   = {0: 4, 1: 12, 2: 10} # Subtracted closed subvalence: 5s,6s / 5p,6p / 5d
+WARM, WARM_MAX_SCF, WARM_MAX_MACRO = True, 3, 6
+MAX_DIIS, MAX_SOSCF, MAX_MACRO = 100, 50, 50
+DIIS_START, CONV_TOL = 1, 1e-9
+VERBOSE, SCF_VERBOSE = 4, 3
+CSF_CUTOFF, PRINT_CSF = 0.05, True
+HARTREE2EV = 27.211386245988
+HARTREE2CM = 219474.63
+TERM_LETTERS = 'SPDFGHIKLMNOQRTU'
+
+BASIS = {
+        'U': gto.parse('''
+    U S
+        3.09793695E+01  1.0
+    U S
+        1.93389862E+01  1.0
+    U S
+        1.19091789E+01  1.0
+    U S
+        7.28108692E+00  1.0
+    U S
+        4.52381555E+00  1.0
+    U S
+        2.69147870E+00  1.0
+    U S
+        1.62933419E+00  1.0
+    U S
+        1.02810670E+00  1.0
+    U S
+        6.05884393E-01  1.0
+    U S
+        3.55646976E-01  1.0
+    U S
+        2.01800187E-01  1.0
+    U S
+        1.24813560E-01  1.0
+    U S
+        6.38361554E-02  1.0
+    U S
+        3.29899773E-02  1.0
+    U S
+        1.68638039E-02  1.0
+    U P
+        4.17040704E+01  1.0
+    U P
+        2.47028799E+01  1.0
+    U P
+        1.44963977E+01  1.0
+    U P
+        8.57586995E+00  1.0
+    U P
+        4.98086081E+00  1.0
+    U P
+        2.84040828E+00  1.0
+    U P
+        1.59903715E+00  1.0
+    U P
+        8.64765972E-01  1.0
+    U P
+        4.57242055E-01  1.0
+    U P
+        2.38933519E-01  1.0
+    U P
+        1.18792999E-01  1.0
+    U P
+        5.70066185E-02  1.0
+    U P
+        2.69891792E-02  1.0
+    U P
+        1.27490309E-02  1.0
+    U D
+        1.38063993E+01  1.0
+    U D
+        8.06231666E+00  1.0
+    U D
+        4.66375400E+00  1.0
+    U D
+        2.63565039E+00  1.0
+    U D
+        1.45796002E+00  1.0
+    U D
+        7.74812159E-01  1.0
+    U D
+        3.72484724E-01  1.0
+    U D
+        1.71955342E-01  1.0
+    U D
+        7.61336090E-02  1.0
+    U D
+        3.20319168E-02  1.0
+    U F
+        3.68446566E+01  1.0
+    U F
+        1.98480492E+01  1.0
+    U F
+        1.07216853E+01  1.0
+    U F
+        5.70450122E+00  1.0
+    U F
+        2.92433437E+00  1.0
+    U F
+        1.43960404E+00  1.0
+    U F
+        6.73859301E-01  1.0
+    U F
+        2.94349701E-01  1.0
+    U F
+        1.13239850E-01  1.0
+    U F
+        5.45732520E-02  1.0
+    ''')
+}
+
+ECP = {
+        'U': libgrpp4pyscf.parse_grpp('''
+    U32     ************************
+            32e-GRECP for U    by N.S.Mosyagin from 14.12.05                                
+            5spd- and 6sp-pseudospinors from the 5f^3 6d^1 7s^0.5 7p^0.5 state 
+             32.00000000    1    3    1    1    1    1    5    5    1
+       11    2                          5S1/2                    6S1/2 
+       29.15213192458267       0.3892130302999023       0.8820465766767023E-001
+       22.56274029826339       -1.083748184436564      -0.3086564941149703     
+       14.84447587432801        1.781625032180986       0.9181156488181954     
+       9.645801059532914      -0.9854978312448497       -1.729616675755459     
+       8.482415442696070       -1.274304374087758       0.4092294750651286     
+       5.255349638915979       0.6815730777883831       0.3122030330938722     
+       2.332900827178482        1.051329975620041        1.175342530499192     
+       1.219936986959094       0.2134368158251923       0.7455058722391363E-001
+      0.5929086195484954       0.7444179777265227E-002 -0.8683061615545491     
+      0.3017887646611004      -0.1559067854174038E-003 -0.5270320674045721     
+      0.1395336706295047       0.9021600395256829E-004 -0.4497506156500129E-001
+       12    4                          5P1/2                    5P3/2                    6P1/2                    6P3/2 
+       35.10933615157832      -0.1707755782130409E-001  0.1505236816664149      -0.2681823269072801E-001  0.1416434858690659E-001
+       28.84291321563328      -0.2102546962232450E-001 -0.4646758956916344       0.6384195601051408E-001 -0.5644339519905654E-001
+       20.86383477095284       0.2496261937574682       0.7894657478698838      -0.5773804767648835E-001  0.1330865849194820     
+       14.10254487950059      -0.6555955386660668       -1.025932779944547      -0.6354699451416718E-001 -0.2739158589451064     
+       9.288244858015013        1.306305857040466        1.073873921395526       0.5098337489394150       0.4683565270185809     
+       6.721649552278908      -0.7709756448547127      -0.2656463499750454      -0.3974809175784501      -0.1590404630689468     
+       2.883104696591459      -0.7139558622601968      -0.6790688127229189      -0.5434765792065456      -0.4533208228310942     
+       1.541141867656880      -0.2777664100579028      -0.4386322154384324      -0.8137238235265629E-001 -0.2901340749369136     
+      0.7700037446753281      -0.2660929218570566E-001 -0.6641037351461508E-001  0.5033767925454345       0.3195327543994370     
+      0.3975724815778846      -0.4020262764046741E-003 -0.1182989297423446E-002  0.5344259830115492       0.5830078583560500     
+      0.2030133288102335      -0.1710675000389824E-003 -0.5426863998303108E-003  0.1704220425723886       0.3160841770134976     
+      0.9490228630676976E-001  0.3825396000927381E-004  0.1061567457164844E-003  0.1063042602352402E-001  0.3918646992872341E-001
+        5    2                          5D3/2                    5D5/2 
+       11.26304309389773      -0.6401234850979690E-001 -0.5327286103768295E-001
+       5.641422968737709       0.1972019582485448E-001 -0.2267986002988396E-001
+       3.109129078979017       0.5738012257157131       0.5558942121394146     
+       1.440417508751449       0.4442699878519954       0.4754922400713096     
+      0.6121891786662117       0.8454167087406664E-001  0.1029015284972698     
+       30    2    0 0.00 30.0 0.00 30.0  7S-AREP                                            5S1/2                    6S1/2                          
+     0  0.2317014268741285        10.00000000000000        0.000000000000000        0.000000000000000        0.000000000000000           
+     1   242.9179564142772        46.11674258885296        0.000000000000000        0.000000000000000        0.000000000000000           
+     1   162.5245117725116       -173.7542231476400        0.000000000000000        0.000000000000000        0.000000000000000           
+     1   109.5811896748054        493.8218589747339        0.000000000000000        0.000000000000000        0.000000000000000           
+     1   72.99200989088527       -827.2746944763821        0.000000000000000        0.000000000000000        0.000000000000000           
+     1   46.29879120425043        502.7935917757445        0.000000000000000        0.000000000000000        0.000000000000000           
+     2   56.20446814945348        3762.479536922336        0.000000000000000        0.000000000000000        0.000000000000000           
+     2   39.03246086970426       -8139.224143504980        0.000000000000000        0.000000000000000        0.000000000000000           
+     2   27.10314958862108        8135.642373621093        0.000000000000000        0.000000000000000        0.000000000000000           
+     2   18.59511711210433       -6569.584218738812        0.000000000000000        0.000000000000000        0.000000000000000           
+     2   12.60710893702717        4267.325782201637        0.000000000000000        0.000000000000000        0.000000000000000           
+     2   8.526947878019678       -2016.310635791310        0.000000000000000        0.000000000000000        0.000000000000000           
+     2   5.793034469369744        862.7465992210173        0.000000000000000        0.000000000000000        0.000000000000000           
+     2   3.934984519097092       -400.0420116141454        0.000000000000000        0.000000000000000        0.000000000000000           
+     2   2.658392335668391        150.2081101762968        0.000000000000000        0.000000000000000        0.000000000000000           
+     2   1.788492782986496       -71.26475467581480        0.000000000000000        0.000000000000000        0.000000000000000           
+     2   1.187818827820123        18.87876566602031        0.000000000000000        0.000000000000000        0.000000000000000           
+     2  0.7872486852090064       -11.49617071779201        0.000000000000000        0.000000000000000        0.000000000000000           
+     2  0.5067914638051081       0.2949813229133569        0.000000000000000        0.000000000000000        0.000000000000000           
+     2  0.3320636860499803       -2.227145207429960        0.000000000000000        0.000000000000000        0.000000000000000           
+     2  0.2133601212283606      -0.1339427383488657        0.000000000000000        0.000000000000000        0.000000000000000           
+     2   29.91532251504295        0.000000000000000        0.000000000000000       -1094.540380429567       -82.15656117829118           
+     2   21.55800111609701        0.000000000000000        0.000000000000000        2580.681958343099        172.0954645702163           
+     2   15.43808645185192        0.000000000000000        0.000000000000000       -2653.068717584802       -156.1198135223662           
+     2   10.52187670701760        0.000000000000000        0.000000000000000        1344.248046940398        58.88635187992008           
+     2   6.754151297511496        0.000000000000000        0.000000000000000       -452.4806739443238       -8.875489860013625           
+     2   4.340698790188259        0.000000000000000        0.000000000000000        147.7084450559241      -0.1127606127019846           
+     2   2.884485940470248        0.000000000000000        0.000000000000000       -41.55250415838098       0.6505493547772339           
+     2   1.923822068682500        0.000000000000000        0.000000000000000        6.662986046210377      -0.1759797231196426           
+     2  0.1332703312510299        0.000000000000000        0.000000000000000      -0.1531709383081229E-001  0.2773465421040718E-002      
+       29    4    0 0 30 0 30 0 30 0 30  7P-AREP                  7P-ESOP                   5P1/2                    5P3/2                    6P1/2                    6P3/2         
+     0  0.1108944958616423        9.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     1   91.30999398009141        39.43091155859992        1.930258869055901        0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     2   231.9471944082305       -130.5646063454102        51.15140238042120        0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     2   78.89329450014930       -435.0767791040475       -359.1740094539089        0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     2   52.41186969049220        1120.493551630994        864.6736476292266        0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     2   34.10475831644786       -1408.450227843489       -1101.638617935573        0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     2   21.14799459689021        2252.035967256824        1089.513030622157        0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     2   14.32141410028800       -2905.159572512028       -611.7160388698682        0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     2   10.37715993218774        2312.957559604401       -174.7511580013867        0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     2   7.339074963666151       -798.8781181575230        387.2561679654767        0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     2   4.572058172104139        136.9515924179399       -149.4120037376143        0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     2   2.781358228231780       -56.70086567452772        50.54455892852867        0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     2   1.684431365497172        9.614041176947085       -16.78361877448787        0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     2   1.090478164140486       -11.84551160141148        4.506396873347090        0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     2  0.4263912578748079       -3.014060937410117      -0.6046488991076755        0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     2  0.2501560815003279      -0.7627218157722118       0.3533441025050941        0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     2  0.1546247515066650      -0.8519542407538329      -0.1313676512794817        0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     2  0.7132156441438754E-001 -0.2575978639077353E-001  0.2835840967417408E-001   0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     2  0.3953736471272211E-001  0.4336813593023247E-002 -0.1109911880950225E-001   0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     2  0.2234894684119505E-001 -0.8300072330660706E-003  0.3045631996457451E-002   0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     2  0.1274999593097006E-001  0.1034679546362060E-003 -0.4314261260358685E-003   0.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     1   14.36253347635924        0.000000000000000        0.000000000000000        187.5841343984885        118.9776764008286        8.535172547387873        10.08022074433214     
+     1   10.21916634442534        0.000000000000000        0.000000000000000       -380.4010505233108       -192.7111977038049       -16.40881039588677       -17.57673288327495     
+     1   6.892114956228067        0.000000000000000        0.000000000000000        294.6629866225379        79.15711882553073        9.822351377646829        10.05522460650142     
+     1   3.944675114142233        0.000000000000000        0.000000000000000       -105.4996404539310       -1.773930339214458       -2.093920742517512       -2.362885361253753     
+     2   2.740759655045481        0.000000000000000        0.000000000000000        69.26818263022125       -13.92905946144987       0.4139693545956010       0.9475847973257341     
+     2   1.774798260307428        0.000000000000000        0.000000000000000       -19.72041175821925        6.916758502129223       0.5741639597204506E-001 -0.1350973669854305     
+     2  0.7852966154003103        0.000000000000000        0.000000000000000        2.027353988360035      -0.9046380968767915      -0.2106498832209941E-001 -0.3632947134300505E-002
+     2  0.3561956792676799        0.000000000000000        0.000000000000000      -0.2680715180603090       0.1290109424729193       0.4347921092257834E-002  0.2089024716426303E-002
+       17    2    0 0.00 30.0 0.00 30.0  6D-AREP                  6D-ESOP                   5D3/2                    5D5/2 
+     0  0.2070300297624345        7.000000000000000        0.000000000000000        0.000000000000000        0.000000000000000     
+     1   47.02977455813188        21.41728289187231       0.1243472901676845        0.000000000000000        0.000000000000000     
+     1   13.17414908396318        82.59465592231041        2.561273387131035        0.000000000000000        0.000000000000000     
+     1   9.416625389969232       -65.21423256180505       -2.186861272763748        0.000000000000000        0.000000000000000     
+     2   5.696403263371752        246.1504948976392       -7.630334648349915        0.000000000000000        0.000000000000000     
+     2   4.100924963821768       -216.9610434772588        19.18537232686124        0.000000000000000        0.000000000000000     
+     2   2.839578333037860        85.14127259738486       -9.581998065820954        0.000000000000000        0.000000000000000     
+     2   1.967778260176243       -34.25996808477208        1.989757985539800        0.000000000000000        0.000000000000000     
+     2  0.6161014542450013       -4.062739567645936      -0.3080035991609553E-001   0.000000000000000        0.000000000000000     
+     2  0.2724940847236936       -1.206964323524060       0.3895579752611927E-002   0.000000000000000        0.000000000000000     
+     2  0.7347608472042746E-001 -0.1115140848839140E-002 -0.1467464583119150E-003   0.000000000000000        0.000000000000000     
+     2   18.93834393744167        0.000000000000000        0.000000000000000       -164.5761545083678       -119.4593521694341     
+     2   13.54497466828996        0.000000000000000        0.000000000000000        357.8991740756574        250.3625457913340     
+     2   9.645214264771086        0.000000000000000        0.000000000000000       -334.5167990767964       -221.3330896240109     
+     2   6.758584995753906        0.000000000000000        0.000000000000000        157.2909374811657        92.56544682439791     
+     2   4.813628913729413        0.000000000000000        0.000000000000000       -41.85216250144985       -21.35608786212828     
+     2   3.440018636116691        0.000000000000000        0.000000000000000        5.470036514910436        2.832154206224443     
+        9    0    0                      5F-AREP                  5F-ESOP
+     0   43.30082314075000        4.000000000000000        0.000000000000000     
+     1   24.72205802454236        86.25446237938201      -0.5296471779355763     
+     1   13.35100063135517       -46.18837754801446       0.5553911373967928     
+     2   10.63771884070873        331.7471942388690        2.743287842664728     
+     2   7.247931526310381       -132.9225343905385       -6.329810468671695     
+     2   3.873957923828072        47.53416688051445        3.644805091856639     
+     2   2.178937006211554       -12.28463466483176      -0.8894950470969931     
+     2   1.469951720761049        3.654142564137235       0.2163433863666313     
+     2   1.003283520090549      -0.4392882501988922      -0.1530470893984948E-001
+       17    0    0                      5G-AREP                  5G-ESOP
+     1   360.6315501468202       -28.64742114130145        1.921463247461583     
+     2   2065.131979133357        97.22299298390718       -17.01080235000500     
+     2   508.2356837089516        396.1667080905177       -1.442833464241581     
+     2   342.5407930811340       -172.7361221647992       -15.75024125419902     
+     2   76.27341270893233       -501.7576344637667        65.63090097276836     
+     2   54.40912754834765        348.6201928187299       -46.08718268858197     
+     2   38.58951644405050       -242.6459139898578        18.04360408132586     
+     2   16.14820080555046       -49.91970370243537      -0.5513756992339177     
+     2   7.024134652169744       -5.163954898364588       0.1630119149669745     
+     2   2.516814643894863      -0.1231613844645565      -0.5057669293439599E-001
+     2   1.572906717635522       0.2992202448477607E-001  0.3836094172595616E-001
+     2  0.9634371755100256      -0.5796070977516611E-002 -0.1126442721407249E-001
+     2  0.5847142804181048       0.3819469723890031E-003  0.2492629275812379E-002
+     2  0.1164512516808590      -0.3715303401337178E-004  0.4197029753519996E-004
+     2  0.2938490053984713E-001 -0.2206818613484872E-005  0.2807930170704953E-005
+     2  0.8511875915625303E-002 -0.6057414003066741E-006  0.3315355957732399E-007
+     2  0.1805372311436570E-002  0.2155264331858628E-007  0.3955860493337014E-007
+    ''')
+}
+
+# ==============================================================================
+# ANGULAR MOMENTUM OPERATOR L^2 & SPECTROSCOPY TOOLKIT
+# ==============================================================================
+def get_orbital_angular_momentum(mol, mo_cas):
+    mol.set_common_origin([0.0, 0.0, 0.0])
+    irxp = mol.intor('int1e_cg_irxp')
+    L_ao = -1j * irxp
+    return np.einsum('pi, xpq, qj -> xij', mo_cas.conj(), L_ao, mo_cas)
+
+
+def calc_L_square_from_rdm(L_cas, casdm1, casdm2):
+    L2_total = 0.0
+    for k in range(3):
+        Lk = L_cas[k]
+        Lk2 = Lk @ Lk
+        term1 = np.einsum('ps, ps ->', Lk2, casdm1)
+        term2 = np.einsum('pq, rs, pqrs ->', Lk, Lk, casdm2)
+        L2_total += (term1 + term2).real
+
+    L_eff = (-1.0 + np.sqrt(1.0 + 4.0 * max(0.0, L2_total))) / 2.0
+    return L2_total, L_eff
+
+
+def format_term_symbol(mult, l_eff):
+    l_idx = int(round(l_eff))
+    char = TERM_LETTERS[l_idx] if 0 <= l_idx < len(TERM_LETTERS) else f"L={l_idx}"
+    mult_int = int(round(mult))
+    return f"^{mult_int}{char}"
+
+
+# ==============================================================================
+# BOOKKEEPING & POPULATION ANALYSIS
+# ==============================================================================
+class CycleCounter:
+    KEYS_E = ('e_tot', 'etot')
+    KEYS_G = ('norm_g', 'norm_gorb', 'grad_norm', 'gnorm')
+
+    def __init__(self):
+        self.n = 0
+        self.e_last = None
+        self.e_prev = None
+        self.g_last = None
+        self.macros = set()
+
+    def __call__(self, envs):
+        self.n += 1
+        im = envs.get('imacro')
+        if im is not None:
+            self.macros.add(int(im))
+        e = next((envs[k] for k in self.KEYS_E if k in envs), None)
+        if e is not None:
+            self.e_prev, self.e_last = self.e_last, float(e)
+        g = next((envs[k] for k in self.KEYS_G if k in envs), None)
+        if g is not None:
+            self.g_last = float(g)
+
+    @property
+    def prec(self):
+        parts = []
+        if None not in (self.e_last, self.e_prev):
+            parts.append(f'dE {abs(self.e_last - self.e_prev):.1e}')
+        if self.g_last is not None:
+            parts.append(f'g {self.g_last:.1e}')
+        return ', '.join(parts) if parts else '—'
+
+    def summary(self):
+        if self.macros:
+            return f'{len(self.macros)} macro'
+        return f'{self.n} cyc' if self.n else None
+
+
+def _counted_kernel(mf, dm0=None):
+    cc = CycleCounter()
+    mf.callback = cc
+    t0 = time.perf_counter()
+    mf.kernel(dm0)
+    return cc, time.perf_counter() - t0
+
+
+def _stage(label, cc):
+    s = cc.summary()
+    return f'{label} {s}' if s else label
+
+
+def ao_l_list(mol):
+    out = []
+    for b in range(mol.nbas):
+        l = mol.bas_angular(b)
+        out += [l] * (2 * l + 1) * mol.bas_nctr(b)
+    return np.array(out)
+
+
+def l_weights(ctx, mo):
+    if mo is None:
+        raise RuntimeError('mo_coeff is None — SCF did not run!')
+    mo = np.asarray(mo, dtype=float)
+    s2, U = np.linalg.eigh(ctx.S)
+    Co = (U * np.sqrt(s2)) @ U.T @ mo
+    W = np.stack([(Co[ctx.l_ao == l]**2).sum(0) for l in range(int(ctx.l_ao.max()) + 1)])
+    return W
+
+
+def valence_config(ctx, occ, mo, etol=CFG_PRINT_TOL):
+    occ, mo = np.asarray(occ, dtype=float), np.asarray(mo, dtype=float)
+    if occ.ndim == 2:
+        nel = sum(o @ l_weights(ctx, c).T for o, c in zip(occ, mo))
+    else:
+        nel = occ @ l_weights(ctx, mo).T
+    tags = 'spdfgh'
+    raw = {tags[l]: round(float(n), 2) for l, n in enumerate(nel) if n > etol}
+    val = {tags[l]: round(float(n - CORE_MAP.get(l, 0)), 2)
+           for l, n in enumerate(nel) if n - CORE_MAP.get(l, 0) > etol}
+    print('  per-l raw:', raw, '\n  valence  :', val)
+    return val
+
+
+def fmt_cfg(cfg):
+    return ' '.join(f'{l}^{n:.2f}' for l, n in cfg.items()) if cfg else '(none)'
+
+
+def config_matches(cfg):
+    if not cfg:
+        return False
+    return all(l in cfg and abs(cfg[l] - n) <= CFG_TOL for l, n in TARGET_CFG.items())
+
+
+def slug(name):
+    s = (name.lower().replace('<', '_').replace('-', '_')
+         .replace('*', '').replace(' ', '_'))
+    while '__' in s:
+        s = s.replace('__', '_')
+    return s
+
+
+def large_ci_cut(ci, ncas, nelecas, cut=CSF_CUTOFF):
+    params = inspect.signature(fci.addons.large_ci).parameters
+    for kw in ('tol', 'lim', 'cutoff'):
+        if kw in params:
+            return fci.addons.large_ci(ci, ncas, nelecas, **{kw: cut})
+    return fci.addons.large_ci(ci, ncas, nelecas, cut)
+
+
+# ==============================================================================
+# SCF ENGINE & CHECKPOINTING
+# ==============================================================================
+def make_scf(ctx, kind, xc=None):
+    mf = {'ROHF': ctx.mol.ROHF, 'UHF': ctx.mol.UHF, 'UKS': ctx.mol.UKS}[kind]()
+    if xc:
+        mf.xc = xc
+    mf.verbose = SCF_VERBOSE
+    return mf
+
+
+def seed_from_chk(mf, tag):
+    path = f'{tag}.chk'
+    if not (WARM and os.path.exists(path)):
+        return False, None
+    try:
+        mol_chk, rec = scf.chkfile.load_scf(path)
+        if mol_chk.nao_nr() != mf.mol.nao_nr() or mol_chk.nelectron != mf.mol.nelectron:
+            print(f'  [{tag}] chk belongs to different system -> cold start')
+            return False, None
+        mf.mo_coeff, mf.mo_occ = rec['mo_coeff'], rec['mo_occ']
+        if rec.get('mo_energy') is not None:
+            mf.mo_energy = rec['mo_energy']
+        print(f'  [{tag}] warm seed (E_prev={rec["e_tot"]:.8f})')
+        return True, rec.get('e_tot')
+    except Exception as ex:
+        print(f'  [{tag}] chk seed failed ({ex}) -> cold start')
+        return False, None
+
+
+def run_scf(ctx, name, kind, strategy=('DIIS', 'SOSCF'), xc=None, dm0=None):
+    tag = slug(name)
+    mf = make_scf(ctx, kind, xc)
+
+    if any(st in ('SMEAR', 'SMEARFS', 'CLEAN') for st in strategy):
+        seeded, e_prev = False, None
+    else:
+        seeded, e_prev = seed_from_chk(mf, tag)
+
+    if seeded:
+        dm0 = mf.make_rdm1(mf.mo_coeff, mf.mo_occ)
+        notes = ['warm verify']
+    else:
+        notes = []
+
+    mf.chkfile, mf.conv_tol = f'{tag}.chk', CONV_TOL
+    stages, wall, cc_last = [], 0.0, None
+
+    for st in strategy:
+        if st == 'DIIS':
+            mf.diis_start_cycle = DIIS_START
+            mf.max_cycle = WARM_MAX_SCF if seeded else MAX_DIIS
+            cc, t = _counted_kernel(mf, dm0)
+            stages.append(_stage('DIIS', cc))
+        elif st == 'SOSCF':
+            mf = mf.newton()
+            mf.max_cycle = WARM_MAX_SCF if seeded else MAX_SOSCF
+            cc, t = _counted_kernel(mf, dm0)
+            stages.append(_stage('SOSCF', cc))
+        elif st == 'SMEAR':
+            mf = _smear_fn(mf, sigma=SMEAR_SIGMA)
+            if dm0 is not None and np.ndim(dm0) == 3 and not mf.istype('UHF'):
+                dm0 = np.dot(mf.mo_coeff * mf.mo_occ, mf.mo_coeff.T)
+            mf.max_cycle = WARM_MAX_SCF if seeded else MAX_DIIS
+            cc, t = _counted_kernel(mf, dm0)
+            stages.append(_stage('SMEAR', cc))
+            notes.append(f'gaussian smear sigma={SMEAR_SIGMA}')
+        elif st == 'SMEARFS':
+            mf = _smear_fn(mf, sigma=SMEAR_SIGMA, fix_spin=True)
+            mf.max_cycle = MAX_DIIS
+            cc, t = _counted_kernel(mf, dm0)
+            stages.append(_stage('SMEARFS', cc))
+            notes.append(f'gaussian smear sigma={SMEAR_SIGMA}, fix_spin')
+        elif st == 'CLEAN':
+            dm = mf.make_rdm1()
+            mf = make_scf(ctx, kind, xc)
+            mf.chkfile, mf.conv_tol = f'{tag}.chk', CONV_TOL
+            mf.max_cycle = MAX_DIIS
+            cc, t = _counted_kernel(mf, dm)
+            stages.append(_stage('CLEAN', cc))
+            notes.append('integer restart from smeared dm')
+
+        wall += t
+        cc_last = cc
+        if mf.converged:
+            break
+
+    if seeded and e_prev is not None and mf.converged:
+        d = abs(mf.e_tot - e_prev)
+        notes.append(f'stationary: dE_vs_chk {d:.1e}')
+
+    mf._meta = dict(cycles=' + '.join(stages), t=wall, prec=cc_last.prec if cc_last else '—')
+    return mf, '; '.join(notes) or '->'.join(strategy)
+
+
+# ==============================================================================
+# PIPELINE SETUP & REGISTRATION
+# ==============================================================================
+def build_system():
+    mol = libgrpp4pyscf.GRPPMole()
+    mol.build(atom=ATOM, basis=BASIS, ecp=ECP, spin=SPIN, charge=CHARGE,
+              unit=UNIT, verbose=VERBOSE)
+    libgrpp4pyscf.compare_integrals_with_pyscf(mol, verbose=True, gradients=False)
+    l_ao = ao_l_list(mol)
+    assert not mol.cart and (l_ao == 3).sum() >= 7, 'need spherical f functions'
+    return SimpleNamespace(
+        mol=mol, S=mol.intor('int1e_ovlp'), l_ao=l_ao,
+        na=(mol.nelectron + SPIN)//2, nb=(mol.nelectron - SPIN)//2,
+        rows=[], mf_ref=None, mc=None, noon=None, natorb=None)
+
+
+def add_row(ctx, name, mf, note, s2=None, l2=np.nan, cfg=None):
+    conv = bool(getattr(mf, 'converged', False))
+    if conv and s2 is None:
+        try:
+            s2 = mf.spin_square()[0]
+        except Exception:
+            s2 = np.nan
+    if conv and cfg is None:
+        cfg = valence_config(ctx, mf.mo_occ, mf.mo_coeff)
+
+    occ = np.asarray(mf.mo_occ, dtype=float)
+    if occ.ndim == 2:
+        szv = float(occ[0].sum() - occ[1].sum()) / 2
+    elif hasattr(mf, 'ncas'):
+        szv = (ctx.na - ctx.nb) / 2
+    elif hasattr(mf, 'istype') and mf.istype('ROHF'):
+        szv = (ctx.na - ctx.nb) / 2
+    else:
+        szv = None
+
+    meta = getattr(mf, '_meta', {})
+    ctx.rows.append(dict(name=name, mf=mf, conv=conv, E=mf.e_tot, S2=s2, L2=l2,
+                         Sz=szv, cfg=cfg, note=note,
+                         cycles=meta.get('cycles', '—'),
+                         t=meta.get('t', 0.0), prec=meta.get('prec', '—')))
+
+
+# ==============================================================================
+# STAGE 1: SINGLE REFERENCE BENCHMARKS
+# ==============================================================================
+STAGE1_SPEC = [
+    ('ROHF',           'ROHF', ('DIIS', 'SOSCF')),
+    ('ROHF-smear*',    'ROHF', ('SMEAR', 'CLEAN')),
+    ('UHF',            'UHF',  ('DIIS', 'SOSCF')),
+    ('UHF-smear*',     'UHF',  ('SMEAR', 'CLEAN')),
+    ('UKS-PBE',        'UKS',  ('DIIS', 'SOSCF')),
+    ('UKS-PBE-smear*', 'UKS',  ('SMEAR', 'CLEAN')),
+    ('UKS-PBE-smear-fs*', 'UKS', ('SMEARFS', 'CLEAN')),
+]
+
+def stage1_scf(ctx):
+    for name, kind, strategy in STAGE1_SPEC:
+        mf, note = run_scf(ctx, name, kind, strategy, xc=XC if kind == 'UKS' else None)
+        add_row(ctx, name, mf, note)
+
+
+# ==============================================================================
+# STAGE 2: MULTICONFIGURATION & SPECTROSCOPY
+# ==============================================================================
+def pick_cas(ctx, mf):
+    """
+    Selects the complete, rotationally invariant atomic valence active space:
+      1 x 7s  (l=0)
+      5 x 6d  (l=2)
+      7 x 5f  (l=3)
+    Total = 13 orbitals. This full SO(3) multiplet ensures L^2 is closed and exact.
+    """
+    e = mf.mo_energy
+    occ = mf.mo_occ
+    W = l_weights(ctx, mf.mo_coeff)
+
+    # 1. 5 valence occupied orbitals from top of occupied spectrum (7s, 6d, 3x 5f)
+    occ_idx = sorted((i for i in range(ctx.mol.nao) if occ[i] > 1e-8), key=lambda i: -e[i])
+    val_occ = []
+    ne = 0.0
+    for i in occ_idx:
+        val_occ.append(i)
+        ne += occ[i]
+        if ne >= 6.0 - 1e-8:
+            break
+
+    val_s = [i for i in val_occ if W[:, i].argmax() == 0]
+    val_d = [i for i in val_occ if W[:, i].argmax() == 2]
+    val_f = [i for i in val_occ if W[:, i].argmax() == 3]
+
+    # 2. Virtual orbitals sorted by energy
+    virt_idx = [i for i in range(ctx.mol.nao) if occ[i] <= 1e-8]
+    virt_d = sorted([i for i in virt_idx if W[:, i].argmax() == 2], key=lambda i: e[i])
+    virt_f = sorted([i for i in virt_idx if W[:, i].argmax() == 3], key=lambda i: e[i])
+
+    # Complete 6d to 5 orbitals, and 5f to 7 orbitals
+    d_needed = max(0, 5 - len(val_d))
+    f_needed = max(0, 7 - len(val_f))
+
+    picked = sorted(val_s + val_d + virt_d[:d_needed] + val_f + virt_f[:f_needed])
+    assert len(picked) == 13, f"Expected 13 valence orbitals, got {len(picked)}"
+
+    print('\n--- CAS picks (1-based) ---')
+    for i in picked:
+        dom = W[:, i].argmax()
+        print(f'  MO {i+1:3d}  occ={occ[i]:.1f}  e={e[i]:+.4f}  char={"spdfgh"[dom]}  purity={W[dom, i]:.2f}')
+    print('  CAS composition: s^1 d^5 f^7 (Complete SO(3) atomic valence space)')
+    return [i + 1 for i in picked]
+
+
+def csf_config_histogram(ctx, mc, cutoff=CSF_CUTOFF):
+    act = mc.mo_coeff[:, mc.ncore : mc.ncore + mc.ncas]
+    dom = np.array(list('spdfgh'))[l_weights(ctx, act).argmax(0)]
+    hist, betas = defaultdict(float), set()
+    for c, sa, sb in large_ci_cut(mc.ci, mc.ncas, mc.nelecas, cutoff):
+        a = int(str(sa), 2)
+        cnt = {l: 0 for l in 'spdfgh'}
+        for j in range(mc.ncas):
+            if (a >> j) & 1:
+                cnt[dom[j]] += 1
+        key = ' '.join(f'{l}^{cnt[l]}' for l in 'spdf' if cnt[l])
+        hist[key] += c * c
+        betas.add(str(sb))
+    return dict(sorted(hist.items(), key=lambda kv: -kv[1])), betas
+
+
+def stage2_cas(ctx):
+    ref_row = next((r for r in ctx.rows if r['name'] == 'ROHF'), None)
+    if ref_row is None or not ref_row['conv']:
+        raise RuntimeError("ROHF seed missing or unconverged for Stage 2!")
+
+    mf_ref = ref_row['mf']
+    ctx.mf_ref = mf_ref
+    cas_idx = pick_cas(ctx, mf_ref)
+    print('\nCAS candidate (1-based):', cas_idx)
+
+    # --------------------------------------------------------------------------
+    # 1. Single-Root CASCI Pre-Flight Registration (Frozen ROHF MOs)
+    # --------------------------------------------------------------------------
+    mci_pre = mcscf.CASCI(mf_ref, len(cas_idx), NELECAS)
+    mci_pre.verbose = 0
+    sorted_mo_pre = mci_pre.sort_mo(cas_idx)
+    mci_pre.kernel(sorted_mo_pre)
+    dm_ao = mci_pre.make_rdm1(ci=mci_pre.ci)
+    noon_ci, natorb_ci = _sc_eigh(ctx.S @ dm_ao @ ctx.S, ctx.S)
+    cfg_casci = valence_config(ctx, noon_ci[::-1], natorb_ci[:, ::-1])
+    add_row(ctx, 'CASCI', mci_pre, 'frozen seed-row MOs', s2=6.0, cfg=cfg_casci)
+
+    # --------------------------------------------------------------------------
+    # 2. State-Specific CASSCF Ground State Optimization
+    # --------------------------------------------------------------------------
+    print("\nRunning State-Specific CASSCF Ground State Optimization...")
+    mc = mcscf.CASSCF(mf_ref, len(cas_idx), NELECAS)
+    mc.chkfile = 'casscf.chk'
+    mc.chk_ci = True
+    mc.conv_tol = CONV_TOL
+    mc.verbose = VERBOSE
+
+    mo0, ci0, e_prev = mc.sort_mo(cas_idx), None, None
+    warm = WARM and os.path.exists('casscf.chk')
+    if warm:
+        try:
+            rec = lib_chk.load('casscf.chk', 'mcscf')
+            if rec.get('mo_coeff') is not None:
+                mo0, ci0 = rec['mo_coeff'], rec.get('ci_vector')
+                e_prev = rec.get('e_tot')
+                print(f'  [casscf] warm seed (E_prev={e_prev})')
+            else:
+                warm = False
+        except Exception as ex:
+            print('  [casscf] chk seed failed:', ex)
+            warm = False
+
+    mc.max_cycle_macro = WARM_MAX_MACRO if warm else MAX_MACRO
+    cc = CycleCounter()
+    mc.callback = cc
+    t0 = time.perf_counter()
+    mc.kernel(mo0) if ci0 is None else mc.kernel(mo0, ci0)
+    t_cas = time.perf_counter() - t0
+
+    noon, natorb = addons.make_natural_orbitals(mc)
+    ss, _ = addons.spin_square(mc)
+    cfg = valence_config(ctx, noon, natorb)
+
+    # Calculate L^2 on relaxed orbitals
+    mo_relaxed_cas = mc.mo_coeff[:, mc.ncore : mc.ncore + mc.ncas]
+    L_relaxed = get_orbital_angular_momentum(ctx.mol, mo_relaxed_cas)
+    casdm1, casdm2 = mc.fcisolver.make_rdm12(mc.ci, mc.ncas, mc.nelecas)
+    l2_casscf, l_eff_casscf = calc_L_square_from_rdm(L_relaxed, casdm1, casdm2)
+    term_casscf = format_term_symbol(np.sqrt(ss + 0.25) * 2, l_eff_casscf)
+
+    print(f'\nE(CASSCF) = {mc.e_tot:.8f}   <S^2> = {ss:.4f}   <L^2> = {l2_casscf:.2f}  Term = {term_casscf}')
+    print('CASSCF NOONs:', np.round(noon[::-1], 3))
+
+    hist, betas = csf_config_histogram(ctx, mc)
+    print('Configuration histogram (alpha classes, |c| > cutoff):')
+    for k, v in hist.items():
+        print(f'   {k:16s}  sum_w = {v:.3f}')
+
+    note = f"CAS({sum(NELECAS)},{len(cas_idx)}); Term: {term_casscf}"
+    if warm and e_prev is not None:
+        note += f"; dE_vs_chk {abs(mc.e_tot - e_prev):.1e}"
+    mc._meta = dict(cycles=_stage('casscf', cc), t=t_cas, prec=cc.prec)
+    add_row(ctx, 'CASSCF', mc, note, s2=ss, l2=l2_casscf, cfg=cfg)
+
+    ctx.mc = mc
+    ctx.noon = noon
+    ctx.natorb = natorb
+
+    # --------------------------------------------------------------------------
+    # 3. Multi-root Spectroscopic Scan on RELAXED CASSCF Orbitals
+    # --------------------------------------------------------------------------
+    print("\n" + "="*75)
+    print("  SPECTROSCOPIC SCAN ON OPTIMIZED CASSCF ORBITALS")
+    print("  QUINTETS (5f^3 6d^1 7s^2) & SEPTETS (5f^3 6d^2 7s^1)")
+    print("="*75)
+
+    # (A) Relaxed Quintets (S=2, nelecas=(5,1))
+    mci_q = mcscf.CASCI(mf_ref, len(cas_idx), NELECAS)
+    mci_q.fcisolver.nroots = 20
+    mci_q.verbose = 0
+    mci_q.kernel(mc.mo_coeff)
+
+    e0 = mci_q.e_tot[0]
+    print(f"\n--- RELAXED QUINTETS (S = 2, nelecas = (5, 1)) ---")
+    print(f"{'Root':<5} {'E (Eh)':<16} {'dE (eV)':<9} {'dE (cm^-1)':<12} {'<S^2>':<7} {'<L^2>':<7} {'Term'}")
+    print("-" * 75)
+    for k in range(mci_q.fcisolver.nroots):
+        dm1, dm2 = mci_q.fcisolver.make_rdm12(mci_q.ci[k], len(cas_idx), NELECAS)
+        l2, l_eff = calc_L_square_from_rdm(L_relaxed, dm1, dm2)
+        de_ev = (mci_q.e_tot[k] - e0) * HARTREE2EV
+        de_cm = (mci_q.e_tot[k] - e0) * HARTREE2CM
+        term = format_term_symbol(5.0, l_eff)
+        print(f"{k:<5} {mci_q.e_tot[k]:16.6f} {de_ev:+8.3f}  {de_cm:+10.1f}   6.00    {l2:6.1f}   {term}")
+
+    # (B) Relaxed Septets (S=3, nelecas=(6,0))
+    mci_s = mcscf.CASCI(mf_ref, len(cas_idx), (6, 0))
+    mci_s.fcisolver.nroots = 6
+    mci_s.verbose = 0
+    mci_s.kernel(mc.mo_coeff)
+
+    print(f"\n--- RELAXED SEPTETS (S = 3, nelecas = (6, 0)) ---")
+    print(f"{'Root':<5} {'E (Eh)':<16} {'dE (eV)':<9} {'dE (cm^-1)':<12} {'<S^2>':<7} {'<L^2>':<7} {'Term'}")
+    print("-" * 75)
+    for k in range(mci_s.fcisolver.nroots):
+        dm1, dm2 = mci_s.fcisolver.make_rdm12(mci_s.ci[k], len(cas_idx), (6, 0))
+        l2, l_eff = calc_L_square_from_rdm(L_relaxed, dm1, dm2)
+        de_ev = (mci_s.e_tot[k] - e0) * HARTREE2EV
+        de_cm = (mci_s.e_tot[k] - e0) * HARTREE2CM
+        term = format_term_symbol(7.0, l_eff)
+        print(f"{k:<5} {mci_s.e_tot[k]:16.6f} {de_ev:+8.3f}  {de_cm:+10.1f}   12.00   {l2:6.1f}   {term}")
+    print("="*75)
+
+
+# ==============================================================================
+# STAGE 3: SEEDED SCF EXPERIMENTS
+# ==============================================================================
+STAGE3_SPEC = [
+    ('UHF<-CAS',                'UHF', 'casscf',  ('DIIS', 'SOSCF')),
+    ('UKS-PBE<-CAS',            'UKS', 'casscf',  ('DIIS', 'SOSCF')),
+    ('UKS-PBE<-CAS-SOSCF',      'UKS', 'casscf',  ('SOSCF',)),
+    ('UKS-PBE<-UHF<-CAS',       'UKS', 'uhf_cas', ('DIIS', 'SOSCF')),
+    ('UKS-PBE<-UHF<-CAS-SOSCF', 'UKS', 'uhf_cas', ('SOSCF',)),
+]
+
+def spin_occs_from_noons(noon, na, nb):
+    idx = np.argsort(-noon)
+    oa = np.zeros(len(noon))
+    ob = np.zeros(len(noon))
+    oa[idx[:na]] = 1.0
+    ob[idx[:nb]] = 1.0
+    return oa, ob
+
+
+def stage3_scf(ctx):
+    mo2 = np.asarray((ctx.natorb, ctx.natorb))
+    occ2 = np.asarray(spin_occs_from_noons(ctx.noon, ctx.na, ctx.nb))
+    for name, kind, seed, strategy in STAGE3_SPEC:
+        xc = XC if kind == 'UKS' else None
+        if seed == 'casscf':
+            dm0 = make_scf(ctx, kind, xc).make_rdm1(mo2, occ2)
+        else:
+            row = next((r for r in ctx.rows if slug(r['name']) == seed), None)
+            if row is None:
+                raise KeyError(f"Seed row {seed!r} not found for {name!r}")
+            dm0 = row['mf'].make_rdm1()
+
+        mf, note = run_scf(ctx, name, kind, strategy, xc=xc, dm0=dm0)
+        add_row(ctx, name, mf, note)
+
+
+# ==============================================================================
+# REPORT GENERATION
+# ==============================================================================
+def report(ctx):
+    mc = ctx.mc
+    hdr = (f"{'method':26} {'conv':>5} {'iterations':>26} {'tolerance':>24} "
+           f"{'E, Eh':>16} {'dE,eV':>8} {'<S^2>':>7} {'<L^2>':>7} "
+           f"{'match':>6}  {'configuration':30} note")
+    md = ['| Method | Conv | Iterations | Tolerance | E, Eh | ΔE, eV | ⟨S²⟩ | ⟨L²⟩ | '
+          'Configuration | Match | Note |',
+          '|---|---|---|---|---|---|---|---|---|---|---|']
+
+    print('\n' + '=' * 25 + ' FINAL COMPARISON ' + '=' * 25)
+    print(hdr)
+    for r in ctx.rows:
+        conv = '✔' if r['conv'] else '✘'
+        hit = '✔' if config_matches(r['cfg']) else '✘'
+        dE_e = f"{(r['E'] - mc.e_tot)*HARTREE2EV:+.3f}" if (r['conv'] and mc is not None and getattr(mc, 'e_tot', None) is not None) else 'n/a'
+        s2s = 'n/a' if r['S2'] is None or np.isnan(r['S2']) else f"{r['S2']:.3f}"
+        l2s = 'n/a' if r.get('L2') is None or np.isnan(r['L2']) else f"{r['L2']:.1f}"
+
+        print(f"{r['name']:26} {conv:>5} {r['cycles']:>26} {r['prec']:>24} "
+              f"{r['E']:16.8f} {dE_e:>8} {s2s:>7} {l2s:>7} "
+              f"{hit:>6}  {fmt_cfg(r['cfg']):30} {r['note']}")
+
+        md.append(f"| {r['name']} | {conv} | {r['cycles']} | {r['prec']} | "
+                  f"{r['E']:.8f} | {dE_e} | {s2s} | {l2s} | "
+                  f"{fmt_cfg(r['cfg'])} | {hit} | {r['note']} |")
+
+    with open('results.md', 'w') as f:
+        f.write('\n'.join(md) + '\n')
+    print('\nMarkdown table written to results.md')
+
+
+# ==============================================================================
+# MAIN ENTRY POINT
+# ==============================================================================
+def main():
+    ctx = build_system()
+    stage1_scf(ctx)
+    stage2_cas(ctx)
+    stage3_scf(ctx)
+    report(ctx)
+
+
+if __name__ == '__main__':
+    main()#INFO: ******************** input file end ********************
+
+
+System: uname_result(system='Linux', node='irbis', release='7.0.0-30-generic', version='#30~24.04.1-Ubuntu SMP PREEMPT_DYNAMIC Fri Aug  7 13:27:52 UTC 2', machine='x86_64')  Threads 128
+Python 3.12.13 | packaged by Anaconda, Inc. | (main, Mar 19 2026, 20:20:58) [GCC 14.3.0]
+numpy 2.5.1  scipy 1.18.0  h5py 3.16.0
+Date: Mon Oct  5 23:20:32 2026
+PySCF version 2.13.1
+PySCF path  /home/kashpur/miniconda3/envs/pyscf/lib/python3.12/site-packages/pyscf
+
+[CONFIG] conf_file None
+[INPUT] verbose = 4
+[INPUT] num. atoms = 1
+[INPUT] num. electrons = 32
+[INPUT] charge = 0
+[INPUT] spin (= nelec alpha-beta = 2S) = 4
+[INPUT] symmetry False subgroup None
+[INPUT] Mole.unit = B
+[INPUT] Symbol           X                Y                Z      unit          X                Y                Z       unit  Magmom
+[INPUT]  1 U      0.000000000000   0.000000000000   0.000000000000 AA    0.000000000000   0.000000000000   0.000000000000 Bohr   0.0
+
+nuclear repulsion = 0
+number of shells = 49
+number of NR pGTOs = 177
+number of NR cGTOs = 177
+basis = {'U': [[0, [30.9793695, 1.0]], [0, [19.3389862, 1.0]], [0, [11.9091789, 1.0]], [0, [7.28108692, 1.0]], [0, [4.52381555, 1.0]], [0, [2.6914787, 1.0]], [0, [1.62933419, 1.0]], [0, [1.0281067, 1.0]], [0, [0.605884393, 1.0]], [0, [0.355646976, 1.0]], [0, [0.201800187, 1.0]], [0, [0.12481356, 1.0]], [0, [0.0638361554, 1.0]], [0, [0.0329899773, 1.0]], [0, [0.0168638039, 1.0]], [1, [41.7040704, 1.0]], [1, [24.7028799, 1.0]], [1, [14.4963977, 1.0]], [1, [8.57586995, 1.0]], [1, [4.98086081, 1.0]], [1, [2.84040828, 1.0]], [1, [1.59903715, 1.0]], [1, [0.864765972, 1.0]], [1, [0.457242055, 1.0]], [1, [0.238933519, 1.0]], [1, [0.118792999, 1.0]], [1, [0.0570066185, 1.0]], [1, [0.0269891792, 1.0]], [1, [0.0127490309, 1.0]], [2, [13.8063993, 1.0]], [2, [8.06231666, 1.0]], [2, [4.663754, 1.0]], [2, [2.63565039, 1.0]], [2, [1.45796002, 1.0]], [2, [0.774812159, 1.0]], [2, [0.372484724, 1.0]], [2, [0.171955342, 1.0]], [2, [0.076133609, 1.0]], [2, [0.0320319168, 1.0]], [3, [36.8446566, 1.0]], [3, [19.8480492, 1.0]], [3, [10.7216853, 1.0]], [3, [5.70450122, 1.0]], [3, [2.92433437, 1.0]], [3, [1.43960404, 1.0]], [3, [0.673859301, 1.0]], [3, [0.294349701, 1.0]], [3, [0.11323985, 1.0]], [3, [0.054573252, 1.0]]]}
+ecp = {'U': [60, [[-1, [[], [[360.6315501468202, -28.64742114130145]], [[2065.131979133357, 97.22299298390718], [508.2356837089516, 396.1667080905177], [342.540793081134, -172.7361221647992], [76.27341270893233, -501.7576344637667], [54.40912754834765, 348.6201928187299], [38.5895164440505, -242.6459139898578], [16.14820080555046, -49.91970370243537], [7.024134652169744, -5.163954898364588], [2.516814643894863, -0.1231613844645565], [1.572906717635522, 0.02992202448477607], [0.9634371755100256, -0.005796070977516611], [0.5847142804181048, 0.0003819469723890031], [0.116451251680859, -3.715303401337178e-05], [0.02938490053984713, -2.206818613484872e-06], [0.008511875915625303, -6.057414003066741e-07], [0.00180537231143657, 2.155264331858628e-08]], [], [], [], []]], [0, [[[0.2317014268741285, 10.0]], [[242.9179564142772, 46.11674258885296], [162.5245117725116, -173.75422314764], [109.5811896748054, 493.8218589747339], [72.99200989088527, -827.2746944763821], [46.29879120425043, 502.7935917757445]], [[56.20446814945348, 3762.479536922336], [39.03246086970426, -8139.22414350498], [27.10314958862108, 8135.642373621093], [18.59511711210433, -6569.584218738812], [12.60710893702717, 4267.325782201637], [8.526947878019678, -2016.31063579131], [5.793034469369744, 862.7465992210173], [3.934984519097092, -400.0420116141454], [2.658392335668391, 150.2081101762968], [1.788492782986496, -71.2647546758148], [1.187818827820123, 18.87876566602031], [0.7872486852090064, -11.49617071779201], [0.5067914638051081, 0.2949813229133569], [0.3320636860499803, -2.22714520742996], [0.2133601212283606, -0.1339427383488657]], [], [], [], []]], [1, [[[0.1108944958616423, 9.0, 0.0]], [[91.3099939800914, 39.43091155859992, 1.2868392460372673]], [[231.9471944082305, -130.5646063454102, 34.1009349202808], [78.8932945001493, -435.0767791040475, -239.44933963593928], [52.4118696904922, 1120.493551630994, 576.4490984194844], [34.10475831644786, -1408.450227843489, -734.4257452903819], [21.14799459689021, 2252.035967256824, 726.3420204147712], [14.321414100288, -2905.159572512028, -407.8106925799121], [10.37715993218774, 2312.957559604401, -116.50077200092446], [7.339074963666151, -798.878118157523, 258.17077864365115], [4.572058172104139, 136.9515924179399, -99.60800249174287], [2.78135822823178, -56.70086567452772, 33.696372619019115], [1.684431365497172, 9.614041176947085, -11.189079182991913], [1.090478164140486, -11.84551160141148, 3.0042645822313934], [0.4263912578748079, -3.014060937410117, -0.40309926607178365], [0.2501560815003279, -0.7627218157722118, 0.23556273500339608], [0.154624751506665, -0.8519542407538329, -0.08757843418632112], [0.07132156441438754, -0.02575978639077353, 0.018905606449449386], [0.03953736471272211, 0.004336813593023247, -0.007399412539668166], [0.02234894684119505, -0.0008300072330660706, 0.002030421330971634], [0.01274999593097006, 0.000103467954636206, -0.00028761741735724565]], [], [], [], []]], [2, [[[0.2070300297624345, 7.0, 0.0]], [[47.02977455813188, 21.41728289187231, 0.049738916067073806], [13.17414908396318, 82.59465592231041, 1.024509354852414], [9.416625389969232, -65.21423256180505, -0.8747445091054993]], [[5.696403263371752, 246.1504948976392, -3.052133859339966], [4.100924963821768, -216.9610434772588, 7.674148930744497], [2.83957833303786, 85.14127259738486, -3.832799226328382], [1.967778260176243, -34.25996808477208, 0.79590319421592], [0.6161014542450013, -4.062739567645936, -0.012320143966438213], [0.2724940847236936, -1.20696432352406, 0.001558231901044771], [0.07347608472042746, -0.00111514084883914, -5.8698583324766006e-05]], [], [], [], []]], [3, [[[43.30082314075, 4.0, 0.0]], [[24.72205802454236, 86.254462379382, -0.15132776512445034], [13.35100063135517, -46.18837754801446, 0.15868318211336938]], [[10.63771884070873, 331.747194238869, 0.7837965264756365], [7.247931526310381, -132.9225343905385, -1.8085172767633415], [3.873957923828072, 47.53416688051445, 1.041372883387611], [2.178937006211554, -12.28463466483176, -0.2541414420277123], [1.469951720761049, 3.654142564137235, 0.061812396104751796], [1.003283520090549, -0.4392882501988922, -0.0043727739828141364]], [], [], [], []]], [4, [[], [[360.6315501468202, 0.0, 0.42699183276924063]], [[2065.131979133357, 0.0, -3.7801783000011113], [508.2356837089516, 0.0, -0.3206296587203513], [342.540793081134, 0.0, -3.5000536120442263], [76.27341270893233, 0.0, 14.58464466061519], [54.40912754834765, 0.0, -10.241596153018214], [38.5895164440505, 0.0, 4.009689795850191], [16.14820080555046, 0.0, -0.12252793316309282], [7.024134652169744, 0.0, 0.036224869992661], [2.516814643894863, 0.0, -0.011239265096532442], [1.572906717635522, 0.0, 0.008524653716879146], [0.9634371755100256, 0.0, -0.002503206047571664], [0.5847142804181048, 0.0, 0.0005539176168471953], [0.116451251680859, 0.0, 9.326732785599991e-06], [0.02938490053984713, 0.0, 6.239844823788785e-07], [0.008511875915625303, 0.0, 7.367457683849774e-09], [0.00180537231143657, 0.0, 8.790801096304475e-09]], [], [], [], []]]]]}
+CPU time:        14.47
+pyscf integrals:
+> overlap done
+> kinetic done
+> nuclear attraction done
+> ecp scalar done
+> ecp spin-orbit done
+libgrpp integrals:
+> overlap done
+> kinetic done
+> nuclear attraction done
+> ecp scalar done
+> ecp spin-orbit done
+-------------------------------------------------------------------
+integrals               max abs diff       pyscf,sec   libgrpp,sec
+-------------------------------------------------------------------
+overlap                 1.11022302e-15         0.133         0.015
+kinetic energy          3.56669041e-14         0.000         0.008
+nuclear attraction      0.00000000e+00         0.011         0.016
+scalar-rel ecp          2.36468622e-11         0.295         0.039
+spin-orbit ecp (x)      5.32825737e-13         0.716         0.032
+spin-orbit ecp (y)      5.32825737e-13            --            --
+spin-orbit ecp (z)      5.32825743e-13            --            --
+SCF not converged.
+SCF energy = -473.332104623617
+converged SCF energy = -473.544969520669
+  per-l raw: {'s': 5.98, 'p': 12.0, 'd': 11.02, 'f': 3.0} 
+  valence  : {'s': 1.98, 'd': 1.02, 'f': 3.0}
+
+WARN: Invalid number of electrons 32 for RHF method.
+
+converged SCF energy = -472.654912188718
+  per-l raw: {'s': 6.01, 'p': 12.17, 'd': 11.9, 'f': 1.92} 
+  valence  : {'s': 2.01, 'p': 0.17, 'd': 1.9, 'f': 1.92}
+converged SCF energy = -473.487047976195  <S^2> = 6.0064341  2S+1 = 5.002573
+  per-l raw: {'s': 6.0, 'p': 12.0, 'd': 10.0, 'f': 4.0} 
+  valence  : {'s': 2.0, 'f': 4.0}
+converged SCF energy = -472.654912176659  <S^2> = -1.9895197e-13  2S+1 = 1
+  per-l raw: {'s': 6.01, 'p': 12.17, 'd': 11.9, 'f': 1.92} 
+  valence  : {'s': 2.01, 'p': 0.17, 'd': 1.9, 'f': 1.92}
+radial grids: 
+    Treutler-Ahlrichs [JCP 102, 346 (1995); DOI:10.1063/1.469408] (M4) radial grids
+    
+becke partition: Becke, JCP 88, 2547 (1988); DOI:10.1063/1.454033
+pruning grids: <function nwchem_prune at 0x7d4c32706de0>
+grids dens level: 3
+symmetrized grids: False
+atomic radii adjust function: <function treutler_atomic_radii_adjust at 0x7d4c32706d40>
+tot grids = 24384
+SCF not converged.
+SCF energy = -475.213702595429 after 100 cycles  <S^2> = 6.0092035  2S+1 = 5.00368
+radial grids: 
+    Treutler-Ahlrichs [JCP 102, 346 (1995); DOI:10.1063/1.469408] (M4) radial grids
+    
+becke partition: Becke, JCP 88, 2547 (1988); DOI:10.1063/1.454033
+pruning grids: <function nwchem_prune at 0x7d4c32706de0>
+grids dens level: 3
+symmetrized grids: False
+atomic radii adjust function: <function treutler_atomic_radii_adjust at 0x7d4c32706d40>
+converged SCF energy = -475.213755834251  <S^2> = 6.0092995  2S+1 = 5.0037184
+  per-l raw: {'s': 6.0, 'p': 12.0, 'd': 10.36, 'f': 3.64} 
+  valence  : {'s': 2.0, 'd': 0.36, 'f': 3.64}
+radial grids: 
+    Treutler-Ahlrichs [JCP 102, 346 (1995); DOI:10.1063/1.469408] (M4) radial grids
+    
+becke partition: Becke, JCP 88, 2547 (1988); DOI:10.1063/1.454033
+pruning grids: <function nwchem_prune at 0x7d4c32706de0>
+grids dens level: 3
+symmetrized grids: False
+atomic radii adjust function: <function treutler_atomic_radii_adjust at 0x7d4c32706d40>
+tot grids = 24384
+converged SCF energy = -475.089606388639  <S^2> = -2.4158453e-13  2S+1 = 1
+  per-l raw: {'s': 5.64, 'p': 12.12, 'd': 11.04, 'f': 3.2} 
+  valence  : {'s': 1.64, 'p': 0.12, 'd': 1.04, 'f': 3.2}
+radial grids: 
+    Treutler-Ahlrichs [JCP 102, 346 (1995); DOI:10.1063/1.469408] (M4) radial grids
+    
+becke partition: Becke, JCP 88, 2547 (1988); DOI:10.1063/1.454033
+pruning grids: <function nwchem_prune at 0x7d4c32706de0>
+grids dens level: 3
+symmetrized grids: False
+atomic radii adjust function: <function treutler_atomic_radii_adjust at 0x7d4c32706d40>
+tot grids = 24384
+converged SCF energy = -475.132284325601  <S^2> = 0.0045705312  2S+1 = 1.0090997
+  per-l raw: {'s': 5.51, 'p': 12.13, 'd': 11.12, 'f': 3.24} 
+  valence  : {'s': 1.51, 'p': 0.13, 'd': 1.12, 'f': 3.24}
+
+--- CAS picks (1-based) ---
+  MO  14  occ=2.0  e=-0.1979  char=s  purity=0.98
+  MO  15  occ=1.0  e=-0.0356  char=d  purity=0.98
+  MO  16  occ=1.0  e=-0.0179  char=f  purity=1.00
+  MO  17  occ=1.0  e=-0.0179  char=f  purity=1.00
+  MO  18  occ=1.0  e=-0.0169  char=f  purity=1.00
+  MO  23  occ=0.0  e=+0.0568  char=d  purity=1.00
+  MO  24  occ=0.0  e=+0.0568  char=d  purity=1.00
+  MO  28  occ=0.0  e=+0.0630  char=d  purity=1.00
+  MO  29  occ=0.0  e=+0.0630  char=d  purity=1.00
+  MO  36  occ=0.0  e=+0.1921  char=f  purity=0.58
+  MO  37  occ=0.0  e=+0.1921  char=f  purity=0.58
+  MO  38  occ=0.0  e=+0.1941  char=f  purity=1.00
+  MO  39  occ=0.0  e=+0.1941  char=f  purity=1.00
+  CAS composition: s^1 d^5 f^7 (Complete SO(3) atomic valence space)
+
+CAS candidate (1-based): [14, 15, 16, 17, 18, 23, 24, 28, 29, 36, 37, 38, 39]
+  per-l raw: {'s': 5.93, 'p': 12.0, 'd': 11.06, 'f': 3.0} 
+  valence  : {'s': 1.93, 'd': 1.06, 'f': 3.0}
+
+Running State-Specific CASSCF Ground State Optimization...
+
+******** <class 'pyscf.mcscf.mc1step.CASSCF'> ********
+CAS (5e+1e, 13o), ncore = 13, nvir = 151
+max_cycle_macro = 50
+max_cycle_micro = 4
+conv_tol = 1e-09
+conv_tol_grad = None
+orbital rotation max_stepsize = 0.02
+orbital rotation threshold for CI restart = 0.01
+augmented hessian ah_max_cycle = 30
+augmented hessian ah_conv_tol = 1e-12
+augmented hessian ah_linear dependence = 1e-14
+augmented hessian ah_level shift = 1e-08
+augmented hessian ah_start_tol = 2.5
+augmented hessian ah_start_cycle = 3
+augmented hessian ah_grad_trust_region = 3
+kf_trust_region = 3
+kf_interval = 4
+ci_response_space = 4
+ci_grad_trust_region = 3
+with_dep4 0
+natorb = False
+canonicalization = True
+sorting_mo_energy = False
+ao2mo_level = 2
+chkfile = casscf.chk
+max_memory 4000 MB (current use 4063 MB)
+internal_rotation = False
+******** <class 'pyscf.fci.direct_spin1.FCISolver'> ********
+max. cycles = 50
+conv_tol = 1e-08
+davidson only = False
+linear dependence = 1e-12
+level shift = 0.001
+max iter space = 12
+max_memory 4000 MB
+nroots = 1
+pspace_size = 400
+spin = None
+CASCI E = -473.551580435132  S^2 = 6.0000000
+Set conv_tol_grad to 3.16228e-05
+macro iter   1 ( 21 JK    4 micro), CASSCF E = -473.562827189353  dE = -1.12467542e-02  S^2 = 6.0000000
+               |grad[o]|=0.00753  |grad[c]|=0.0136  |ddm|=0.0639  |maxRot[o]|=0.303
+macro iter   2 ( 21 JK    4 micro), CASSCF E = -473.572770559964  dE = -9.94337061e-03  S^2 = 6.0000000
+               |grad[o]|=0.0105  |grad[c]|=0.0116  |ddm|=0.0332  |maxRot[o]|=0.306
+macro iter   3 ( 21 JK    4 micro), CASSCF E = -473.575574379958  dE = -2.80381999e-03  S^2 = 6.0000000
+               |grad[o]|=0.00872  |grad[c]|=0.00349  |ddm|=0.0214  |maxRot[o]|=0.282
+macro iter   4 ( 21 JK    4 micro), CASSCF E = -473.576047681850  dE = -4.73301892e-04  S^2 = 6.0000000
+               |grad[o]|=0.00396  |grad[c]|=0.00181  |ddm|=0.00399  |maxRot[o]|=0.315
+macro iter   5 ( 21 JK    4 micro), CASSCF E = -473.577882930318  dE = -1.83524847e-03  S^2 = 6.0000000
+               |grad[o]|=0.00309  |grad[c]|=0.00464  |ddm|=0.0183  |maxRot[o]|=0.311
+macro iter   6 ( 21 JK    4 micro), CASSCF E = -473.582933337523  dE = -5.05040721e-03  S^2 = 6.0000000
+               |grad[o]|=0.0293  |grad[c]|=0.00627  |ddm|=0.107  |maxRot[o]|=0.306
+macro iter   7 ( 21 JK    4 micro), CASSCF E = -473.588556536852  dE = -5.62319933e-03  S^2 = 6.0000000
+               |grad[o]|=0.0291  |grad[c]|=0.00727  |ddm|=0.198  |maxRot[o]|=0.308
+macro iter   8 ( 21 JK    4 micro), CASSCF E = -473.596629901794  dE = -8.07336494e-03  S^2 = 6.0000000
+               |grad[o]|=0.0215  |grad[c]|=0.012  |ddm|=0.301  |maxRot[o]|=0.304
+macro iter   9 ( 20 JK    4 micro), CASSCF E = -473.599740168005  dE = -3.11026621e-03  S^2 = 6.0000000
+               |grad[o]|=0.0206  |grad[c]|=0.00506  |ddm|=0.0679  |maxRot[o]|=0.288
+macro iter  10 ( 20 JK    4 micro), CASSCF E = -473.600517876088  dE = -7.77708083e-04  S^2 = 6.0000000
+               |grad[o]|=0.00739  |grad[c]|=0.00211  |ddm|=0.0367  |maxRot[o]|=0.153
+macro iter  11 ( 20 JK    4 micro), CASSCF E = -473.600688103181  dE = -1.70227093e-04  S^2 = 6.0000000
+               |grad[o]|=0.0038  |grad[c]|=0.00137  |ddm|=0.0179  |maxRot[o]|=0.0845
+macro iter  12 ( 20 JK    4 micro), CASSCF E = -473.600716794651  dE = -2.86914693e-05  S^2 = 6.0000000
+               |grad[o]|=0.00117  |grad[c]|=0.000715  |ddm|=0.00629  |maxRot[o]|=0.039
+macro iter  13 ( 24 JK    4 micro), CASSCF E = -473.600721844101  dE = -5.04945052e-06  S^2 = 6.0000000
+               |grad[o]|=0.000459  |grad[c]|=0.000302  |ddm|=0.00219  |maxRot[o]|=0.0202
+macro iter  14 ( 21 JK    4 micro), CASSCF E = -473.600722651086  dE = -8.06984360e-07  S^2 = 6.0000000
+               |grad[o]|=9.05e-05  |grad[c]|=0.000156  |ddm|=0.000781  |maxRot[o]|=0.00721
+macro iter  15 ( 22 JK    3 micro), CASSCF E = -473.600722717257  dE = -6.61713102e-08  S^2 = 6.0000000
+               |grad[o]|=3.43e-05  |grad[c]|=8.2e-05  |ddm|=4.1e-16  |maxRot[o]|=0.00135
+macro iter  16 ( 14 JK    2 micro), CASSCF E = -473.600722757245  dE = -3.99880946e-08  S^2 = 6.0000000
+               |grad[o]|=1.94e-05  |grad[c]|=6.36e-05  |ddm|=5.2e-16  |maxRot[o]|=0.00104
+macro iter  17 (  9 JK    1 micro), CASSCF E = -473.600722780660  dE = -2.34154527e-08  S^2 = 6.0000000
+               |grad[o]|=1.52e-05  |grad[c]|=4.95e-05  |ddm|=3.8e-16  |maxRot[o]|=0.000828
+macro iter  18 (  8 JK    1 micro), CASSCF E = -473.600722794591  dE = -1.39309009e-08  S^2 = 6.0000000
+               |grad[o]|=1.15e-05  |grad[c]|=4.24e-05  |ddm|=7.38e-16  |maxRot[o]|=0.000568
+macro iter  19 (  7 JK    1 micro), CASSCF E = -473.600722803140  dE = -8.54879545e-09  S^2 = 6.0000000
+               |grad[o]|=8.92e-06  |grad[c]|=3.57e-05  |ddm|=2.48e-16  |maxRot[o]|=0.000449
+macro iter  20 (  6 JK    1 micro), CASSCF E = -473.600722808178  dE = -5.03825959e-09  S^2 = 6.0000000
+               |grad[o]|=6.49e-06  |grad[c]|=3.15e-05  |ddm|=3.24e-16  |maxRot[o]|=0.00031
+macro iter  21 (  7 JK    1 micro), CASSCF E = -473.600722811733  dE = -3.55487373e-09  S^2 = 6.0000000
+               |grad[o]|=5.4e-06  |grad[c]|=2.71e-05  |ddm|=7.54e-16  |maxRot[o]|=0.000234
+macro iter  22 (  7 JK    1 micro), CASSCF E = -473.600722814291  dE = -2.55755594e-09  S^2 = 6.0000000
+               |grad[o]|=4.52e-06  |grad[c]|=2.35e-05  |ddm|=3.9e-16  |maxRot[o]|=0.00021
+macro iter  23 (  6 JK    1 micro), CASSCF E = -473.600722816183  dE = -1.89237426e-09  S^2 = 6.0000000
+               |grad[o]|=3.75e-06  |grad[c]|=1.99e-05  |ddm|=3.33e-16  |maxRot[o]|=0.000165
+macro iter  24 (  6 JK    1 micro), CASSCF E = -473.600722817619  dE = -1.43529633e-09  S^2 = 6.0000000
+               |grad[o]|=4.23e-06  |grad[c]|=1.74e-05  |ddm|=4.73e-16  |maxRot[o]|=0.000154
+macro iter  25 (  6 JK    1 micro), CASSCF E = -473.600722818697  dE = -1.07849019e-09  S^2 = 6.0000000
+               |grad[o]|=3.81e-06  |grad[c]|=1.51e-05  |ddm|=5.66e-16  |maxRot[o]|=0.000124
+macro iter  26 (  6 JK    1 micro), CASSCF E = -473.600722819501  dE = -8.03709099e-10  S^2 = 6.0000000
+               |grad[o]|=3.18e-06  |grad[c]|=1.32e-05  |ddm|=8.08e-16  |maxRot[o]|=0.000113
+1-step CASSCF converged in  26 macro (397 JK  71 micro) steps
+CASSCF canonicalization
+Density matrix diagonal elements [1.83362322 0.38758451 0.65844271 0.73639213 0.59368488 0.14487746
+ 0.0766714  0.05747544 0.42912225 0.04744096 0.05265518 0.49488019
+ 0.48714968]
+CASSCF energy = -473.600722819501
+CASCI E = -473.600722819501  E(CI) = -6.89531031086614  S^2 = 6.0000000
+  per-l raw: {'s': 5.84, 'p': 12.13, 'd': 11.04, 'f': 2.99} 
+  valence  : {'s': 1.84, 'p': 0.13, 'd': 1.04, 'f': 2.99}
+
+E(CASSCF) = -473.60072282   <S^2> = 6.0000   <L^2> = 49.90  Term = ^5K
+CASSCF NOONs: [-0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.
+ -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.
+ -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.
+ -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.
+ -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.
+ -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.
+ -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.
+ -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.    -0.
+ -0.     0.     0.     0.     0.     0.     0.     0.     0.     0.
+  0.     0.     0.     0.     0.     0.     0.     0.     0.     0.
+  0.     0.     0.     0.     0.     0.     0.     0.     0.     0.
+  0.     0.     0.     0.     0.     0.     0.     0.     0.     0.
+  0.     0.     0.     0.     0.     0.     0.     0.     0.     0.
+  0.     0.     0.     0.     0.     0.     0.     0.     0.     0.
+  0.     0.     0.     0.     0.     0.     0.     0.     0.     0.
+  0.     0.019  0.033  0.04   0.043  0.043  0.477  0.496  0.5    0.5
+  0.501  0.508  0.992  1.848  2.     2.     2.     2.     2.     2.
+  2.     2.     2.     2.     2.     2.     2.   ]
+Configuration histogram (alpha classes, |c| > cutoff):
+   s^1 d^1 f^3       sum_w = 0.842
+   s^1 p^1 f^3       sum_w = 0.008
+   p^1 d^1 f^3       sum_w = 0.006
+   s^1 p^1 d^1 f^2   sum_w = 0.003
+
+===========================================================================
+  SPECTROSCOPIC SCAN ON OPTIMIZED CASSCF ORBITALS
+  QUINTETS (5f^3 6d^1 7s^2) & SEPTETS (5f^3 6d^2 7s^1)
+===========================================================================
+
+--- RELAXED QUINTETS (S = 2, nelecas = (5, 1)) ---
+Root  E (Eh)           dE (eV)   dE (cm^-1)   <S^2>   <L^2>   Term
+---------------------------------------------------------------------------
+0          -473.600723   +0.000        +0.0   6.00      49.9   ^5K
+1          -473.600723   +0.000        +0.0   6.00      49.9   ^5K
+2          -473.577606   +0.629     +5073.5   6.00      30.0   ^5H
+3          -473.577606   +0.629     +5073.6   6.00      30.0   ^5H
+4          -473.574804   +0.705     +5688.4   6.00      27.6   ^5H
+5          -473.574803   +0.705     +5688.7   6.00      27.6   ^5H
+6          -473.574199   +0.722     +5821.3   6.00      18.2   ^5G
+7          -473.573220   +0.748     +6036.2   6.00      18.7   ^5G
+8          -473.571036   +0.808     +6515.5   6.00      17.5   ^5G
+9          -473.570411   +0.825     +6652.6   6.00      12.3   ^5F
+10         -473.570162   +0.832     +6707.2   6.00      14.7   ^5F
+11         -473.559550   +1.120     +9036.3   6.00      16.7   ^5G
+12         -473.557166   +1.185     +9559.6   6.00      14.4   ^5F
+13         -473.557065   +1.188     +9581.9   6.00      14.4   ^5F
+14         -473.550897   +1.356    +10935.6   6.00      52.2   ^5K
+15         -473.550897   +1.356    +10935.6   6.00      52.2   ^5K
+16         -473.548467   +1.422    +11468.9   6.00      52.8   ^5K
+17         -473.548467   +1.422    +11468.9   6.00      52.8   ^5K
+18         -473.546055   +1.488    +11998.1   6.00       8.0   ^5D
+19         -473.545596   +1.500    +12099.0   6.00      10.2   ^5F
+
+--- RELAXED SEPTETS (S = 3, nelecas = (6, 0)) ---
+Root  E (Eh)           dE (eV)   dE (cm^-1)   <S^2>   <L^2>   Term
+---------------------------------------------------------------------------
+0          -473.550897   +1.356    +10935.6   12.00     52.2   ^7K
+1          -473.550897   +1.356    +10935.6   12.00     52.2   ^7K
+2          -473.548467   +1.422    +11468.9   12.00     52.8   ^7K
+3          -473.548467   +1.422    +11468.9   12.00     52.8   ^7K
+4          -473.525884   +2.036    +16425.3   12.00     23.0   ^7G
+5          -473.523941   +2.089    +16851.7   12.00     22.8   ^7G
+===========================================================================
+converged SCF energy = -473.546413916156  <S^2> = 6.2182578  2S+1 = 5.086554
+  per-l raw: {'s': 5.89, 'p': 12.0, 'd': 11.11, 'f': 3.0} 
+  valence  : {'s': 1.89, 'd': 1.11, 'f': 3.0}
+radial grids: 
+    Treutler-Ahlrichs [JCP 102, 346 (1995); DOI:10.1063/1.469408] (M4) radial grids
+    
+becke partition: Becke, JCP 88, 2547 (1988); DOI:10.1063/1.454033
+pruning grids: <function nwchem_prune at 0x7d4c32706de0>
+grids dens level: 3
+symmetrized grids: False
+atomic radii adjust function: <function treutler_atomic_radii_adjust at 0x7d4c32706d40>
+tot grids = 24384
+SCF not converged.
+SCF energy = -475.213629347504 after 100 cycles  <S^2> = 6.008974  2S+1 = 5.0035883
+
+WARN: Newton solver expects mo_coeff with mo_occ as initial guess but mo_occ is not found in the arguments.
+      The given argument is treated as density matrix.
+
+radial grids: 
+    Treutler-Ahlrichs [JCP 102, 346 (1995); DOI:10.1063/1.469408] (M4) radial grids
+    
+becke partition: Becke, JCP 88, 2547 (1988); DOI:10.1063/1.454033
+pruning grids: <function nwchem_prune at 0x7d4c32706de0>
+grids dens level: 3
+symmetrized grids: False
+atomic radii adjust function: <function treutler_atomic_radii_adjust at 0x7d4c32706d40>
+converged SCF energy = -475.213744939365  <S^2> = 6.0094215  2S+1 = 5.0037672
+  per-l raw: {'s': 6.0, 'p': 12.0, 'd': 10.36, 'f': 3.64} 
+  valence  : {'s': 2.0, 'd': 0.36, 'f': 3.64}
+
+WARN: Newton solver expects mo_coeff with mo_occ as initial guess but mo_occ is not found in the arguments.
+      The given argument is treated as density matrix.
+
+radial grids: 
+    Treutler-Ahlrichs [JCP 102, 346 (1995); DOI:10.1063/1.469408] (M4) radial grids
+    
+becke partition: Becke, JCP 88, 2547 (1988); DOI:10.1063/1.454033
+pruning grids: <function nwchem_prune at 0x7d4c32706de0>
+grids dens level: 3
+symmetrized grids: False
+atomic radii adjust function: <function treutler_atomic_radii_adjust at 0x7d4c32706d40>
+tot grids = 24384
+converged SCF energy = -475.213744939927  <S^2> = 6.0094179  2S+1 = 5.0037657
+  per-l raw: {'s': 6.0, 'p': 12.0, 'd': 10.36, 'f': 3.64} 
+  valence  : {'s': 2.0, 'd': 0.36, 'f': 3.64}
+radial grids: 
+    Treutler-Ahlrichs [JCP 102, 346 (1995); DOI:10.1063/1.469408] (M4) radial grids
+    
+becke partition: Becke, JCP 88, 2547 (1988); DOI:10.1063/1.454033
+pruning grids: <function nwchem_prune at 0x7d4c32706de0>
+grids dens level: 3
+symmetrized grids: False
+atomic radii adjust function: <function treutler_atomic_radii_adjust at 0x7d4c32706d40>
+tot grids = 24384
+SCF not converged.
+SCF energy = -475.213515925532 after 100 cycles  <S^2> = 6.0065394  2S+1 = 5.0026151
+
+WARN: Newton solver expects mo_coeff with mo_occ as initial guess but mo_occ is not found in the arguments.
+      The given argument is treated as density matrix.
+
+radial grids: 
+    Treutler-Ahlrichs [JCP 102, 346 (1995); DOI:10.1063/1.469408] (M4) radial grids
+    
+becke partition: Becke, JCP 88, 2547 (1988); DOI:10.1063/1.454033
+pruning grids: <function nwchem_prune at 0x7d4c32706de0>
+grids dens level: 3
+symmetrized grids: False
+atomic radii adjust function: <function treutler_atomic_radii_adjust at 0x7d4c32706d40>
+converged SCF energy = -475.213714174661  <S^2> = 6.0093941  2S+1 = 5.0037562
+  per-l raw: {'s': 6.0, 'p': 12.0, 'd': 10.36, 'f': 3.64} 
+  valence  : {'s': 2.0, 'd': 0.36, 'f': 3.64}
+
+WARN: Newton solver expects mo_coeff with mo_occ as initial guess but mo_occ is not found in the arguments.
+      The given argument is treated as density matrix.
+
+radial grids: 
+    Treutler-Ahlrichs [JCP 102, 346 (1995); DOI:10.1063/1.469408] (M4) radial grids
+    
+becke partition: Becke, JCP 88, 2547 (1988); DOI:10.1063/1.454033
+pruning grids: <function nwchem_prune at 0x7d4c32706de0>
+grids dens level: 3
+symmetrized grids: False
+atomic radii adjust function: <function treutler_atomic_radii_adjust at 0x7d4c32706d40>
+tot grids = 24384
+converged SCF energy = -475.213714168621  <S^2> = 6.0093979  2S+1 = 5.0037578
+  per-l raw: {'s': 6.0, 'p': 12.0, 'd': 10.36, 'f': 3.64} 
+  valence  : {'s': 2.0, 'd': 0.36, 'f': 3.64}
+
+========================= FINAL COMPARISON =========================
+method                      conv                 iterations                tolerance            E, Eh    dE,eV   <S^2>   <L^2>  match  configuration                  note
+ROHF                           ✔ DIIS 100 cyc + SOSCF 18 macro    dE 0.0e+00, g 6.7e-06    -473.54496952   +1.517   6.000     n/a      ✔  s^1.98 d^1.02 f^3.00           DIIS->SOSCF
+ROHF-smear*                    ✔               SMEAR 22 cyc    dE 8.6e-10, g 4.1e-07    -472.65491219  +25.737   0.000     n/a      ✘  s^2.01 p^0.17 d^1.90 f^1.92    gaussian smear sigma=0.02
+UHF                            ✔                DIIS 93 cyc    dE 6.8e-10, g 3.1e-05    -473.48704798   +3.093   6.006     n/a      ✘  s^2.00 f^4.00                  DIIS->SOSCF
+UHF-smear*                     ✔               SMEAR 21 cyc    dE 8.3e-10, g 1.1e-06    -472.65491218  +25.737  -0.000     n/a      ✘  s^2.01 p^0.17 d^1.90 f^1.92    gaussian smear sigma=0.02
+UKS-PBE                        ✔ DIIS 100 cyc + SOSCF 26 macro    dE 0.0e+00, g 9.1e-06    -475.21375583  -43.893   6.009     n/a      ✘  s^2.00 d^0.36 f^3.64           DIIS->SOSCF
+UKS-PBE-smear*                 ✔               SMEAR 14 cyc    dE 8.3e-10, g 1.3e-07    -475.08960639  -40.515  -0.000     n/a      ✘  s^1.64 p^0.12 d^1.04 f^3.20    gaussian smear sigma=0.02
+UKS-PBE-smear-fs*              ✔             SMEARFS 14 cyc    dE 1.2e-10, g 1.9e-07    -475.13228433  -41.676   0.005     n/a      ✘  s^1.51 p^0.13 d^1.12 f^3.24    gaussian smear sigma=0.02, fix_spin
+CASCI                          ✔                          —                        —    -473.55158044   +1.337   6.000     n/a      ✔  s^1.93 d^1.06 f^3.00           frozen seed-row MOs
+CASSCF                         ✔            casscf 26 macro    dE 8.0e-10, g 3.2e-06    -473.60072282   +0.000   6.000    49.9      ✔  s^1.84 p^0.13 d^1.04 f^2.99    CAS(6,13); Term: ^5K
+UHF<-CAS                       ✔                DIIS 91 cyc    dE 4.3e-10, g 2.5e-05    -473.54641392   +1.478   6.218     n/a      ✔  s^1.89 d^1.11 f^3.00           DIIS->SOSCF
+UKS-PBE<-CAS                   ✔ DIIS 100 cyc + SOSCF 32 macro    dE 0.0e+00, g 6.9e-06    -475.21374494  -43.893   6.009     n/a      ✘  s^2.00 d^0.36 f^3.64           DIIS->SOSCF
+UKS-PBE<-CAS-SOSCF             ✔             SOSCF 29 macro    dE 0.0e+00, g 1.6e-05    -475.21374494  -43.893   6.009     n/a      ✘  s^2.00 d^0.36 f^3.64           SOSCF
+UKS-PBE<-UHF<-CAS              ✔ DIIS 100 cyc + SOSCF 15 macro    dE 0.0e+00, g 2.2e-05    -475.21371417  -43.892   6.009     n/a      ✘  s^2.00 d^0.36 f^3.64           DIIS->SOSCF
+UKS-PBE<-UHF<-CAS-SOSCF        ✔             SOSCF 15 macro    dE 0.0e+00, g 1.0e-05    -475.21371417  -43.892   6.009     n/a      ✘  s^2.00 d^0.36 f^3.64           SOSCF
+
+Markdown table written to results.md
