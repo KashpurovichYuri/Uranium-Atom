@@ -1077,24 +1077,37 @@ p-pop ≈ 0).
 
 ## 6. Energy tables (annotated)
 
-All energies in Hartree (1 Ha = 219 476 cm⁻¹ = 27.2114 eV); term gaps in
-mHa where marked. Every entry carries its route (§0.2) and data source;
-the annotations say WHY each number sits where it does.
+All energies in Hartree (1 Ha = 219 476 cm⁻¹ = 27.2114 eV); ΔE in the
+dedicated column (mHa / eV), always vs the raw quintet ROHF. One-line
+annotations say WHAT the quantity is; the sections hold the details.
 
-| quantity | value / Ha | E / eV | annotation (route, why, source) |
-|---|---|---|---|
-| E(raw quintet ROHF) | −50.381852 | −1370.9600 | raw-ROHF, spin=4 (§4.1): the unrestricted reference; reproduces the driver's `rohf.chk` and the original project number −50.3818; the exact-evaluator gate passes at 0.0000 mHa (`u14e_energy_ncheck`) |
-| E(m-averaged density of the raw quintet ROHF, one shot) | −49.714300 | −1352.7950 | the §4.2 density evaluated WITHOUT SCF self-consistency, exact (α,β)-split evaluator; **+667.552 mHa = 18.1650 eV** above the raw ROHF — the one-shot cost of forcing the m-averaged (ensemble) configuration; no SCF happens inside `spherical_reference` (§4.2 statement 3, §5.4) |
-| E(pinned ensemble SCF, raw config, CONVERGED) | −49.749341 | −1353.7485 | self-consistent at the same ensemble: DIIS ≡ newton (same fixed point to 1e-8), exact-evaluator cross-check 0.0000 mHa; **+632.511 mHa = 17.2115 eV** (`u14e_pinned_scf`) |
-| E(ensemble-SCF, CAS-target ensemble) | −49.800062 | −1355.1287 | §4.3 rerun on the UHF carrier (exact fractional occ): cycle-capped, conv=False under exact bookkeeping; span open (1.53); CASCI in it ⟨L²⟩ = 5.48 (`u14e_ensscf`) |
-| E_CASCI(6,13), sph reference | **−50.164365** | −1365.0419 | THE reference: the route works because the m-average supplies a density whose Fock commutes with l² (so pure-l columns exist) AND the complete-shell span satisfies closure (§3.2) — both theorem premises delivered by construction (`u14e_roots60`) |
-| E_CASCI(6,13), raw basis | −50.387840 | −1371.1230 | §4.1: 223.47 mHa = 6.0809 eV BELOW the reference = 16.8 term gaps (⁵I→⁵L = 13.33 mHa = 0.3627 eV) — the purity premium: the open span is a richer variational space, term-blind (`u14e_energy_ncheck`). **Reconciliation of the two "symmetry costs" (all same-evaluator now)**: the one-shot m-average costs +667.6 mHa; the symmetrized-basis CASCI sits 450.1 mHa = 12.25 eV BELOW that one-shot density energy (the CI recovers most of the forced-ensemble cost by reconstituting the Hund physics inside the span) and 223.5 mHa above the raw-basis CASCI — the genuine variational extra of the raw SPACE (§5.3b). **The ROHF→CASCI gaps**: raw 6.0 mHa = 0.16 eV vs symmetrized 450.1 mHa = 12.25 eV — expected: a forced non-stationary density has correlation+relaxation headroom, a converged ROHF does not |
-| E_CASCI(6,16), sph reference | −50.168752 | −1365.1613 | §2.3: +4.4 mHa from 7p correlation; duplicate terms appear (`u14e_cas16`) |
-| freezing 7s² → CAS(4,12) | −50.155587 | −1364.8031 | +8.78 mHa vs the (6,13) reference; invariants complete (§3.1); used to refute the p-theft mechanism (`u14e_frozen7s`) |
-| freezing 7s²+7p³ → CAS(4,15) | −50.155589 | −1364.8031 | +13.16 mHa vs (6,16) (`frozen7s_invariants`) |
-| ss-CASSCF stationary points | −50.4399…−50.4594 | −1372.5405…−1373.0714 | §4.4: 4 distinct points, all span-open — the true minima of the unconstrained model (`u14e_energy_ncheck` stationarity) |
-| symmetry-breaking advantage | 0.26–0.29 Ha | 7.07–7.89 eV | the saddle depth = reference minus the span-open minima; the target interval for §4.8b's constrained optimization |
-| atoms: ΔE_CASCI(raw→sph) | ≤ 3 mHa (Sc sto: 16.9, space-size caveat) | ≤ 0.08 eV (Sc sto: 0.46 eV) | on light atoms the two bases are energetically interchangeable; on U they are not (`atom_table` meta) |
+| quantity | E / Ha | E / eV | ΔE vs raw ROHF | what it is |
+|---|---|---|---|---|
+| E(raw quintet ROHF) | −50.381852 | −1370.9600 | 0 | the unrestricted reference: fresh spin=4 ROHF, no chk; reproduces the driver's `rohf.chk` (§4.1, `u14e_energy_ncheck`) |
+| E(m-averaged density, one shot) | −49.714300 | −1352.7950 | +667.552 / +18.1650 eV | the raw density after the spherical m-average, evaluated ONCE — no SCF happens inside `spherical_reference` (§4.2, `u14e_energy_ncheck`) |
+| E(pinned ensemble SCF, raw config) | −49.749341 | −1353.7485 | +632.511 / +17.2115 eV | SCF made self-consistent AT that ensemble: occupations pinned to the shell-m-averaged pattern (shell-lock), orbitals re-optimized on a UHF carrier (exact fractional occ); DIIS ≡ newton, exact-evaluator cross-check 0.0000 mHa (`u14e_pinned_scf`, §4.3) |
+| E(ensemble-SCF, CAS-target ensemble) | −49.800062 | −1355.1287 | +581.790 / +15.8313 eV | the same machinery at the CAS-target configuration (7s² 6d⁵/5, 5f⁷·3/7); cycle-capped, conv=False (§4.3, `u14e_ensscf`) |
+| E_CASCI(6,13), sph reference | **−50.164365** | −1365.0419 | +217.487 / +5.9181 eV | **THE reference**: CASCI with orbitals frozen from `spherical_reference` on the raw quintet ROHF; span closed by construction → the exact ⁵I ladder (§4.2, `u14e_roots60`) |
+| E_CASCI(6,13), raw basis | −50.387840 | −1371.1230 | -5.988 / -0.1629 eV | CASCI in the raw ROHF's own MOs: lower, but term-blind — the span is open (§4.1, `u14e_energy_ncheck`) |
+| E_CASCI(6,16), sph | −50.168752 | −1365.1613 | +213.100 / +5.7987 eV | +virtual 7p³: the duplicate ⁵G/⁵I terms appear (§2.3, `u14e_cas16`) |
+| freezing 7s² → CAS(4,12) | −50.155587 | −1364.8031 | +226.265 / +6.1570 eV | +8.78 mHa vs the sph reference; refutes the p-theft mechanism (§4.4, `u14e_frozen7s`) |
+| freezing 7s²+7p³ → CAS(4,15) | −50.155589 | −1364.8031 | +226.263 / +6.1569 eV | +13.16 mHa vs the (6,16) reference (`frozen7s_invariants`) |
+| ss-CASSCF stationary points | −50.4399…−50.4594 | −1372.5405…−1373.0714 | -58.080 / -1.5804 eV … -77.590 / -2.1113 eV | 4 distinct span-open minima — the unconstrained model's true minima (§4.4, `u14e_energy_ncheck`) |
+| symmetry-breaking advantage | 223.475 mHa | 6.0809 eV | — | = the two CASCI rows' difference (16.8 term gaps); the saddle depth and the §4.8b target interval |
+| atoms: ΔE_CASCI(raw→sph) | ≤ 3 mHa | ≤ 0.08 eV | — | Sc sto: 16.9 mHa (space-size caveat); on light atoms the bases are interchangeable (§2.2, `atom_table`) |
+
+**How to read the two "symmetry costs"** (all same-evaluator, §0.5):
+the one-shot m-average costs **+667.6 mHa** — the exchange the forced
+ensemble gives up (§4.2, statement 3); SCF self-consistency at that
+ensemble buys back only 35 mHa. The CI in the spherical span then sits
+**450.1 mHa = 12.25 eV below** the one-shot density energy — it
+recovers most of the cost by reconstituting the Hund physics inside the
+span — yet remains **223.5 mHa = 6.08 eV above** the raw-basis CI: that
+residual is the open span's genuine variational advantage (the purity
+premium, §5.3b). **The ROHF→CASCI gaps**: 6.0 mHa = 0.16 eV (raw
+chain) vs 450.1 mHa = 12.25 eV (symmetric chain) — expected: a forced
+non-stationary density carries correlation + relaxation headroom; a
+converged ROHF does not.
 
 ### 6.1 The ROHF / CASCI / CASSCF comparison (all spin=4, exact evaluators)
 
