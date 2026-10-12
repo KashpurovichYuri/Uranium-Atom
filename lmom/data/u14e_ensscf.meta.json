@@ -1,20 +1,20 @@
 {
- "e_broken_scf": -50.15164379,
- "e_ensemble_scf": -49.48971730022782,
- "e_oneshot_avg_density": -49.40157441,
+ "e_broken_scf": -50.381852333488794,
+ "e_ensemble_scf": -49.489717293723395,
+ "e_oneshot_avg_density": -49.42154446,
  "e_casci_sph_basis": -50.16436519,
- "e_casci_ensemble": -49.65593647991098,
- "l2_root0": 17.274961590500286,
+ "e_casci_ensemble": -49.64977038361368,
+ "l2_root0": 19.22898502584871,
  "l_closed": false,
- "invar": 1.2285769355223302,
- "purity_max": 1.3032765055376176e-05,
+ "invar": 1.286906615740209,
+ "purity_max": 3.87592894845685e-06,
  "passport": {
-  "orthonorm": 1.8673235837291834e-11,
+  "orthonorm": 1.60125143170127e-11,
   "occ_sum": 14.0,
   "core_occ_dev": 0.0,
-  "act_l_dev_max": 1.3032765055376176e-05,
+  "act_l_dev_max": 3.87592894845685e-06,
   "ok": false
  },
  "purif_l_closed": false,
- "purif_invar": 2.2303742314892516
+ "purif_invar": 1.7905396288129298
 }

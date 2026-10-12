@@ -521,10 +521,16 @@ raw root — an accidental mixture value), the dm route picks up the
 outside-column pathways the closed-span derivation excludes. A note on
 basins: plain Aufbau ROHF has many near-degenerate solutions and the run
 lands in one of them start-dependently (the multi-basin issue behind
-the Ti sto row of §2.2). On U, the raw CASCI energy −50.387840 is
-*lower* than the spherical −50.164365 by 223.5 mHa: the open span is a
-richer variational space — term-blind, which is exactly the point of
-§6.
+the Ti sto row of §2.2). **The U-14e raw reference, measured fresh
+(spin=4 explicit, no checkpoint)**: E = −50.381852 Ha = −1370.9600 eV —
+reproducing the driver's `rohf.chk` and the project's original −50.3818.
+**The spin trap**: the same run with `mol.spin` left unset converges the
+SINGLET Aufbau at −50.151644 = −1364.6958 eV — a value that historically
+entered the energy tables mislabeled as "the raw ROHF"; all `build_mol`
+helpers now pass `spin=4` explicitly (§7). On U, the raw CASCI energy
+−50.387840 is *lower* than the spherical −50.164365 by 223.5 mHa: the
+open span is a richer variational space — term-blind, which is exactly
+the point of §6.
 
 ### 4.2 sph-ROHF/CASCI — the reference route
 
@@ -631,9 +637,11 @@ multiplet picks silently return in-span projections.
    Lz-diagonalization needs complex m-eigenstates. Status: open (§8).
 3. **Exchange is parallel-spin only**, and it favors the m-separated
    (Hund) pattern. The m-anisotropic states harvest it; the ensemble pays
-   750 mHa for giving it up (measured, §6) — precisely BECAUSE the
-   configuration is forced (the m-average destroys the exchange-
-   favorable orbital assignment of the Hund determinant). Radial mixing
+   960.3 mHa at the one-shot HF level for giving it up (measured, §6) —
+   precisely BECAUSE the configuration is forced (the m-average destroys
+   the exchange-favorable orbital assignment of the Hund determinant);
+   SCF self-consistency at the pinned density recovers about half of it
+   (§4.3) but has no unique fixed point. Radial mixing
    neither creates parallel-spin pairs nor improves exchange at fixed
    occupations — hence no ROHF fuel for radial drift; the CASSCF fuel is
    static correlation instead (§4.4).
@@ -682,8 +690,8 @@ mf.make_rdm1 = frac_rdm1
 6. CASCI on the result; certificates; CASCI-on-ensemble-basis control.
 
 Outcome (`u14e_ensscf.meta.json`): E(ensemble-SCF) = −49.489717 — exactly
-between the one-shot averaged density (−49.401574, §6) and the fresh
-Aufbau SCF (−50.151644); orbitals l-pure to 1.3e-5; **but** the span is
+between the one-shot averaged density (−49.421544, §6) and the fresh
+quintet Aufbau SCF (−50.381852); orbitals l-pure to 3.9e-6; **but** the span is
 open (dev 1.23) because the energetically optimal columns are
 *radial-mixed within l* (rank ≥ 2 — statement 2 of §4.2). Radial mixing
 is detected indirectly by the span certificate; the DIRECT test — the
@@ -1001,11 +1009,12 @@ C[r,m]-profile check is open, §8]. See §4.4 for the full paragraph.
 ### 5.4 Is the m-averaging too rude? **[measured, partially confirmed]**
 The bookkeeping is exact (per-contraction shell blocks, same-m coupling,
 cross-l zeroing — verified by gates B/M/Z and the worked example). The
-750 mHa cost of averaging the U density is (i) real ensemble-formation
-physics and (ii) partly the one-shot protocol: the self-consistent
-ensemble recovers ~0.09 Ha of it (−49.4016 → −49.4897) but cannot close
-the span (§4.3). What fraction is intrinsic vs protocol is *partially*
-resolved. [Scope: light atoms and small open shells do not show this
+960.3 mHa (one-shot) cost of averaging the U density is (i) real
+ensemble-formation physics and (ii) partly the one-shot protocol: the
+self-consistent ensemble recovers ~0.47 Ha of it (−49.4215 → −49.4897)
+but cannot close the span (§4.3), and the pinned-SCF value is
+protocol-dependent (DIIS −49.7706 / newton −49.8883 unconverged). What
+fraction is intrinsic vs protocol is *partially* resolved. [Scope: light atoms and small open shells do not show this
 cost at any comparable scale — the effect grows with the number of
 near-degenerate valence shells.]
 
@@ -1072,11 +1081,13 @@ the annotations say WHY each number sits where it does.
 
 | quantity | value / Ha | E / eV | annotation (route, why, source) |
 |---|---|---|---|
-| E(fresh Aufbau SCF) | −50.151644 | −1364.6958 | raw-ROHF (§4.1), span-open by construction (m-selected determinant density); the SCF start of most routes (`u14e_energy_ncheck`) |
-| E(m-averaged density, one shot) | −49.401574 | −1344.2853 | the §4.2 density evaluated WITHOUT SCF self-consistency; 750 mHa ABOVE the raw SCF — the measured cost of forcing the m-averaged (ensemble) configuration against the exchange-favoring Hund assignment (§4.2 statement 3, §5.4) |
-| E(ensemble-SCF, locked) | −49.489717 | −1346.6838 | §4.3: self-consistency recovers 0.09 Ha of that cost but the columns go radial-mixed → span open → not term-valid (`u14e_ensscf`) |
+| E(raw quintet ROHF) | −50.381852 | −1370.9600 | raw-ROHF, spin=4 (§4.1): the unrestricted reference; reproduces the driver's `rohf.chk` and the original project number −50.3818 (`u14e_energy_ncheck`) |
+| E(singlet Aufbau ROHF, spin unset) | −50.151644 | −1364.6958 | THE TRAP ROW: `gto.M` without `spin=` silently converges the singlet; this value was historically mislabeled "the raw ROHF" (§7) |
+| E(m-averaged density, one shot) | −49.421544 | −1344.8287 | the §4.2 density evaluated WITHOUT SCF self-consistency; **+960.308 mHa = 26.1313 eV** above the quintet ROHF — the one-shot cost of forcing the m-averaged (ensemble) configuration (§4.2 statement 3, §5.4) |
+| E(pinned SCF at that density) | −49.7706 / −49.8883 | −1354.3270 / −1357.5297 | self-consistent variant, protocol-dependent: DIIS-converged / newton unconverged (+611.3 / +493.6 mHa vs raw) — the ensemble SCF has no unique fixed point |
+| E(ensemble-SCF, locked) | −49.489717 | −1346.6838 | §4.3 (rerun spin=4): self-consistency recovers ~0.47 Ha of the 960 mHa but the columns go radial-mixed → span open (dev 1.29) → not term-valid (`u14e_ensscf`) |
 | E_CASCI(6,13), sph reference | **−50.164365** | −1365.0419 | THE reference: the route works because the m-average supplies a density whose Fock commutes with l² (so pure-l columns exist) AND the complete-shell span satisfies closure (§3.2) — both theorem premises delivered by construction (`u14e_roots60`) |
-| E_CASCI(6,13), raw basis | −50.387840 | −1371.1230 | §4.1: 223.47 mHa = 6.0809 eV BELOW the reference = 16.8 term gaps (⁵I→⁵L = 13.33 mHa = 0.3627 eV) — the purity premium: the open span is a richer variational space, term-blind (`u14e_energy_ncheck`) |
+| E_CASCI(6,13), raw basis | −50.387840 | −1371.1230 | §4.1: 223.47 mHa = 6.0809 eV BELOW the reference = 16.8 term gaps (⁵I→⁵L = 13.33 mHa = 0.3627 eV) — the purity premium: the open span is a richer variational space, term-blind (`u14e_energy_ncheck`). **Reconciliation of the two "symmetry costs"**: at the ROHF level the one-shot m-average costs +960.3 mHa; the CI in the one-shot spherical MOs recovers that penalty by correlation (−50.1644 sits 218 mHa BELOW the raw ROHF!), and what remains between the two CIs (223.5 mHa) is the genuine variational extra of the raw SPACE (§5.3b) |
 | E_CASCI(6,16), sph reference | −50.168752 | −1365.1613 | §2.3: +4.4 mHa from 7p correlation; duplicate terms appear (`u14e_cas16`) |
 | freezing 7s² → CAS(4,12) | −50.155587 | −1364.8031 | +8.78 mHa vs the (6,13) reference; invariants complete (§3.1); used to refute the p-theft mechanism (`u14e_frozen7s`) |
 | freezing 7s²+7p³ → CAS(4,15) | −50.155589 | −1364.8031 | +13.16 mHa vs (6,16) (`frozen7s_invariants`) |
@@ -1147,7 +1158,10 @@ project grows. `battery_lib.py` is the emerging shared test surface;
 (truncated old-session saves; superseded by `u14e_rohf_sph` and
 `u14e_rohf_raw_control`) — data hygiene, noted, not blocking.
 
-**pyscf traps encountered** (all pinned in code comments): ROHF 1-d
+**pyscf traps encountered** (all pinned in code comments): **`gto.M`
+without `spin=` silently converges the singlet Aufbau for an open-shell
+atom — the −50.1516 incident (verified: spin-4 −50.381852 vs spin-0
+−50.151644); every `build_mol` now passes `spin=4` explicitly**; ROHF 1-d
 fractional occ → `occa = (occ>0)`; `contract_1e` pack_tril
 symmetrization; MOM integerizes; Davidson mixes degenerate blocks; MO
 columns reorder at every eigendecomposition (hence `mo_passport`);

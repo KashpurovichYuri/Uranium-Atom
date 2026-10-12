@@ -38,7 +38,9 @@ def build_mol():
          {'__name__': 'run14e_cfg',
           '__file__': os.path.join(ROOT, '14e', 'run_14e.py')}, ns)
     return gto.M(atom='U 0 0 0', basis=ns['BASIS'],
-                 ecp={'U': ns['STUTTGART_RLC_ECP78']}, verbose=0)
+                 ecp={'U': ns['STUTTGART_RLC_ECP78']}, spin=4,
+                 verbose=0)   # spin=4 MANDATORY: unset spin silently
+                 # converges the singlet Aufbau (the -50.1516 incident)
 
 
 def main():
@@ -153,10 +155,20 @@ def main():
     print(f'ensemble-CASCI: E = {e_ci[0]:.8f} (sph-ROHF ref '
           f'-50.164365); <L^2>(root0) = {q0:.6f}')
 
+    # e_broken_scf: the TRUE unrestricted quintet ROHF (fresh, spin=4;
+    # the old -50.15164379 was the SINGLET Aufbau solution — an unset
+    # mol.spin — verified 2026: fresh spin-4 ROHF = -50.38185233,
+    # fresh spin-0 ROHF = -50.15164379)
+    mf_raw = scf.ROHF(mol)
+    mf_raw.kernel()
+    if not mf_raw.converged:
+        mf_raw = mf_raw.newton()
+        mf_raw.kernel()
+    e_broken = float(mf_raw.e_tot)
     ref = dict(
-        e_broken_scf=-50.15164379,
+        e_broken_scf=e_broken,
         e_ensemble_scf=e_ens,
-        e_oneshot_avg_density=-49.40157441,
+        e_oneshot_avg_density=-49.42154446,
         e_casci_sph_basis=-50.16436519,
         e_casci_ensemble=float(e_ci[0]),
         l2_root0=float(q0),

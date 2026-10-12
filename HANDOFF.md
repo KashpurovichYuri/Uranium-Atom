@@ -51,8 +51,15 @@ via `python tests/make_big_table.py`).
   columns), every CASSCF start (8/8 in wave 2). The span-open minima
   are the true variational minima; the symmetric manifold is a saddle
   (depth 0.26–0.29 Ha).
-- Energy legitimacy: raw vs sph CASCI on U: 223.5 mHa = 16.8 term gaps
-  (the purity premium); ≤3 mHa on light atoms. Freezing 7s²: +8.78 mHa.
+- Energy legitimacy (CORRECTED 2026, spin-verified): raw quintet ROHF
+  (spin=4, fresh, no chk) = −50.381852 (the project's original number);
+  one-shot E[dm_sph] = −49.421544 (+960.308 mHa = 26.13 eV — the true
+  one-shot smearing cost); ensemble-SCF −49.489717 (recovers ~0.47 Ha,
+  span still open); pinned-SCF protocol-dependent (−49.77 DIIS / −49.89
+  newton). CASCI premium: raw −50.387840 vs sph −50.164365 = 223.5 mHa
+  = 16.8 term gaps; ≤3 mHa on light atoms. Freezing 7s²: +8.78 mHa.
+  The old 750 mHa figure and "e_raw = −50.151644" were artifacts of an
+  unset mol.spin (singlet silently converged) — fixed everywhere.
 - NO audit: all CAS spaces saturated (no missing orbitals, no core
   drain). Frozen-7s refutes the p-theft mechanism (drift persists with
   p-pop ≈ 0).
@@ -94,8 +101,10 @@ Run it FIRST on any new reference.
 ## Environment facts
 - PySCF 2.13.1, numpy 2.5.1, scipy; 128 cores; OMP_NUM_THREADS=64
   typical.
-- pyscf traps (all pinned in code comments): ROHF 1-d fractional occ →
-  `occa = (occ>0)`; `contract_1e` pack_tril symmetrization (cannot apply
+- pyscf traps (all pinned in code comments): **`gto.M` without `spin=`
+  silently converges the SINGLET Aufbau (−50.151644) instead of the
+  quintet (−50.381852) — always pass spin explicitly**; ROHF 1-d
+  fractional occ → `occa = (occ>0)`; `contract_1e` pack_tril symmetrization (cannot apply
   non-symmetric one-body operators); MOM integerizes occupations;
   Davidson mixes degenerate blocks; MO columns reorder at every
   eigendecomposition (use mo_passport); `mc.get_h1eff()` returns a
