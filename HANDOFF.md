@@ -51,15 +51,22 @@ via `python tests/make_big_table.py`).
   columns), every CASSCF start (8/8 in wave 2). The span-open minima
   are the true variational minima; the symmetric manifold is a saddle
   (depth 0.26–0.29 Ha).
-- Energy legitimacy (CORRECTED 2026, spin-verified): raw quintet ROHF
-  (spin=4, fresh, no chk) = −50.381852 (the project's original number);
-  one-shot E[dm_sph] = −49.421544 (+960.308 mHa = 26.13 eV — the true
-  one-shot smearing cost); ensemble-SCF −49.489717 (recovers ~0.47 Ha,
-  span still open); pinned-SCF protocol-dependent (−49.77 DIIS / −49.89
-  newton). CASCI premium: raw −50.387840 vs sph −50.164365 = 223.5 mHa
-  = 16.8 term gaps; ≤3 mHa on light atoms. Freezing 7s²: +8.78 mHa.
-  The old 750 mHa figure and "e_raw = −50.151644" were artifacts of an
-  unset mol.spin (singlet silently converged) — fixed everywhere.
+- Energy legitimacy (FINAL, spin- + evaluator-verified): raw quintet
+  ROHF (spin=4, fresh, no chk) = −50.381852 (the project's original
+  number; reproduces rohf.chk exactly). One-shot m-averaged density
+  (exact (α,β)-split evaluator): −49.714300 (+667.552 mHa = 18.17 eV —
+  the true one-shot smearing cost). Pinned ensemble SCF CONVERGED
+  (DIIS ≡ newton, UHF carrier, cross-check 0.0000 mHa): −49.749341
+  (+632.5 mHa = 17.21 eV). Ensemble-SCF (CAS-target, cycle-capped,
+  conv=False): −49.800062, span open. CASCI premium: raw −50.387840 vs
+  sph −50.164365 = 223.5 mHa = 16.8 term gaps = 6.08 eV; ≤3 mHa on
+  light atoms. Freezing 7s²: +8.78 mHa. All one-shot numbers via the
+  exact spin-split evaluator — NEVER the RHF total-dm formula, NEVER
+  pyscf ROHF with fractional occ (its Fock build thresholds occ>0 —
+  use the UHF carrier). The old 750/960 mHa and "e_raw = −50.151644"
+  were artifacts (unset spin + wrong evaluator) — fixed everywhere.
+  The reference chain reproduces end-to-end from a fresh ROHF
+  (README §6.1).
 - NO audit: all CAS spaces saturated (no missing orbitals, no core
   drain). Frozen-7s refutes the p-theft mechanism (drift persists with
   p-pop ≈ 0).

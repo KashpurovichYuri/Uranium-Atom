@@ -94,35 +94,47 @@ def main():
                     break
         return occ_r
 
-    mf = scf.ROHF(mol)
-    mf.mo_coeff = mo0
-    mf.mo_occ = occ
-    mf.get_occ = shell_get_occ
-    # CRITICAL: pyscf ROHF make_rdm1 maps a 1-d fractional occ by
-    # occa = (occ > 0) — a 0.43 column becomes FULLY alpha-occupied
-    # (the electron count corrupts; the docstring allows only 1 or 2).
-    # The ensemble needs the true fractional density (spin-half split):
-    def frac_rdm1(mo_coeff=None, mo_occ=None, **k):
-        moc = mo0 if mo_coeff is None else np.asarray(mo_coeff)
-        o = occ if mo_occ is None else np.asarray(mo_occ)
-        return (moc * o) @ moc.T
-    mf.make_rdm1 = frac_rdm1
+    # The ensemble SCF runs on a UHF CARRIER: fractional (alpha,beta)
+    # occupations are exact there (occa = clip(occ,0,1),
+    # occb = clip(occ-1,0,1)) — pyscf's ROHF would threshold the 1-d
+    # occ by occ>0 in its internal Fock build (the electron-count
+    # corruption trap) and evaluate energies with the RHF total-dm
+    # formula. The UHF carrier needs no overrides beyond get_occ.
+    occa0 = np.clip(occ, 0, 1)
+    occb0 = np.clip(occ - 1, 0, 1)
+    mf = scf.UHF(mol)
+    mf.max_cycle = 500
+    mf.conv_tol = 1e-9
+    mf.mo_coeff = np.stack([mo0, mo0])
+    mf.mo_occ = np.stack([occa0, occb0])
+
+    def shell_get_occ_uhf(mo_energy=None, mo_coeff=None, **k):
+        moc = mf.mo_coeff if mo_coeff is None else np.asarray(mo_coeff)
+        # lock the TOTAL 1-d pattern, then split per spin
+        occ_tot = shell_get_occ(mo_energy=mo_energy, mo_coeff=moc[0])
+        return np.stack([np.clip(occ_tot, 0, 1),
+                         np.clip(occ_tot - 1, 0, 1)])
+
+    mf.get_occ = shell_get_occ_uhf
     t0 = time.time()
     mf.kernel()
     if not mf.converged:
         mf = mf.newton()
+        mf.get_occ = shell_get_occ_uhf
         mf.kernel()
     e_ens = float(mf.e_tot)
+    occ = np.asarray(mf.mo_occ).sum(axis=0)
     print(f'ensemble-SCF: converged = {mf.converged}, '
           f'E = {e_ens:.8f} ({time.time() - t0:.0f} s)')
 
     # the passport: did the columns keep their shells?
-    p1 = mo_passport(mol, mf.mo_coeff, occ, act, list(range(NCORE)), 14,
+    p1 = mo_passport(mol, np.asarray(mf.mo_coeff)[0], occ, act,
+                     list(range(NCORE)), 14,
                      expect_l=[0] + [2] * 5 + [3] * 7,
                      label='ensemble-SCF')
 
     # certificates + purity on the ensemble orbitals
-    L = get_L(mol, mf.mo_coeff)
+    L = get_L(mol, np.asarray(mf.mo_coeff)[0])
     sc = span_certificate(L, act)
     pdev = purity_devs(L, act)
     print(f'span: l_closed = {sc["l_closed"]}, invar = '
@@ -133,7 +145,7 @@ def main():
     # set may only rotate within degenerate shells; compare via the
     # certificate, not raw arrays — phases/orderings are arbitrary)
     mf_d = scf.ROHF(mol)
-    mf_d.mo_coeff = mf.mo_coeff
+    mf_d.mo_coeff = np.asarray(mf.mo_coeff)[0]
     mf_d.mo_occ = occ
     mf_d.e_tot = 0.0
     mf_d.converged = True
@@ -168,7 +180,7 @@ def main():
     ref = dict(
         e_broken_scf=e_broken,
         e_ensemble_scf=e_ens,
-        e_oneshot_avg_density=-49.42154446,
+        e_oneshot_avg_density=-49.71430012,  # exact evaluator (energy_ncheck)
         e_casci_sph_basis=-50.16436519,
         e_casci_ensemble=float(e_ci[0]),
         l2_root0=float(q0),

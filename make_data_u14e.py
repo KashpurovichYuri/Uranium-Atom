@@ -194,7 +194,7 @@ def main():
 
     # (a) frozen CASCI on the SPHERICAL reference MOs with the
     # radial-group pick — the certified term analysis
-    mf_s = scf.RHF(mol)   # a carrier for the spherical MOs/occ
+    mf_s = scf.ROHF(mol)  # a carrier for the spherical MOs/occ
     from lmom.reference import spherical_reference
     mo_sph, mo_e_sph = spherical_reference(mf)
     mf_s.mo_coeff = mo_sph

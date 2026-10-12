@@ -37,7 +37,8 @@ def build_mol():
          {'__name__': 'run14e_cfg',
           '__file__': os.path.join(ROOT, '14e', 'run_14e.py')}, ns)
     return gto.M(atom='U 0 0 0', basis=ns['BASIS'],
-                 ecp={'U': ns['STUTTGART_RLC_ECP78']}, verbose=0)
+                 ecp={'U': ns['STUTTGART_RLC_ECP78']}, spin=4,
+                 verbose=0)   # spin explicit: unset spin converges the singlet
 
 
 def main():

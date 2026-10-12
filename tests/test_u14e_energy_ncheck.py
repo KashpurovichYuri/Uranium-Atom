@@ -21,7 +21,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from pyscf import gto, scf, mcscf, fci
 from lmom.moments import moment_mats, moment_expectation
 from lmom.expectation import L2Lz_expectation_dm
-from battery_lib import (n_expectation, energy_of_density, casci_run)
+from battery_lib import (n_expectation, energy_of_density,
+                        energy_of_density_spin, casci_run)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NA, NB, NCORE = 5, 1, 4
@@ -62,6 +63,17 @@ def main():
     dm = mf_raw.make_rdm1()
     if dm.ndim == 3:            # the spin-Kramer pair -> the total dm
         dm = dm.sum(axis=0)
+    # sanity gate: the exact spin-split evaluator must reproduce e_tot
+    e_raw_chk = energy_of_density(mol, mf_raw.mo_coeff,
+                                  np.asarray(mf_raw.mo_occ))
+    print(f'evaluator gate: E_split(raw) = {e_raw_chk:.8f} '
+          f'(e_tot {e_raw:.8f}) diff {(e_raw_chk - e_raw)*1e3:+.4f} mHa')
+    dm_a = (np.asarray(mf_raw.mo_coeff)
+            * np.clip(np.asarray(mf_raw.mo_occ), 0, 1)) \
+        @ np.asarray(mf_raw.mo_coeff).T
+    dm_b = (np.asarray(mf_raw.mo_coeff)
+            * np.clip(np.asarray(mf_raw.mo_occ) - 1, 0, 1)) \
+        @ np.asarray(mf_raw.mo_coeff).T
     # the m-averaged density: the exact block code of
     # lmom/reference.py (proven), no re-diagonalization
     dm_sph = np.zeros_like(dm)
@@ -83,7 +95,12 @@ def main():
                 n = a1 - a0
                 dm_sph[a0:a1, b0:b1] = \
                     (np.trace(dm[a0:a1, b0:b1]) / n) * np.eye(n)
-    e_sph = float(mf_raw.energy_tot(dm=dm_sph))
+    # the exact evaluator on the m-averaged spin densities (each
+    # m-averaged per shell separately — the density of the raw quintet
+    # after spherical_reference; NO SCF happens in this step)
+    from lmom.reference import m_average_density
+    e_sph = energy_of_density_spin(mol, m_average_density(mol, dm_a),
+                                   m_average_density(mol, dm_b))
     print(f'E(raw ROHF SCF)            = {e_raw:.8f}')
     print(f'E(m-averaged density)      = {e_sph:.8f}   '
           f'dE = {(e_sph - e_raw) * 1000:+.3f} mHa')
