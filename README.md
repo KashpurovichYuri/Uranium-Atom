@@ -632,64 +632,51 @@ multiplet picks silently return in-span projections.
    occupations — hence no ROHF fuel for radial drift; the CASSCF fuel is
    static correlation instead (§4.4).
 
-### 4.3 ensemble-SCF + CASCI (`tests/test_u14e_ensscf.py`, `u14e_ensscf.meta.json`)
+### 4.3 the pinned ensemble SCF + CASCI (`tests/test_u14e_pinned_scf.py`,
+`u14e_pinned_ensemble.meta.json`)
 
-**Why the name.** The pinned m-averaged occupations (7s¹, 6d⁵ spread as
-1/5 over five columns, 5f⁷ as 3/7 over seven) are a *fractional-occupation
-ensemble density*; the route makes SCF self-consistent with that ensemble
-instead of a single determinant.
+**Why the name.** The m-averaged occupations (7s²; 6d¹ spread as 1/5
+over five columns; 5f³ as 3/7 over seven) are a *fractional-occupation
+ensemble density*; the route makes SCF self-consistent with that
+ensemble instead of a single determinant.
 
-Steps and the three implementation traps:
-1. Pin the fractional occ vector on the stored spherical basis.
-2. **Trap 1 — index-pinning scrambles.** Each SCF cycle re-diagonalizes F
-   and re-sorts columns by orbital energy; identities swap between
-   cycles. Concretely (illustrative index list):
+Steps:
+1. Identify the shell columns on the fresh l-pure basis (⟨l²⟩ + Fock
+   order), fix the ensemble occ vector on them.
+2. Run the SCF on a **UHF carrier**: its (dm_α, dm_β) is exact for
+   fractional occupations natively — no overrides needed beyond the
+   occupation **shell-lock** (per cycle, each shell's pattern is
+   re-assigned to its best-overlap current columns).
+3. CASCI on the result; certificates; the CASCI-on-pinned-orbitals
+   verification.
 
-   | cycle | col 9 | col 13 |
-   |---|---|---|
-   | k | ε = −0.31 → 5f₁ | ε = −0.30 → 6d₁ |
-   | k+1 | ε = −0.30 → 6d₁ | ε = −0.31 → 5f₁ |
+The three implementation traps (all met, all documented):
+1. **Index-pinning scrambles.** Each SCF cycle re-diagonalizes F and
+   re-sorts columns by orbital energy — the pinned occupation lands on
+   a different physical orbital (illustration: columns 9 and 13 swap
+   ε between cycles, so "col 9 ← 1/5" leaks 6d character into 5f).
+2. **MOM integerizes** — the right *steering* tool (drives SCF into
+   excited configurations; used for the UKS-MOM start of §4.9), but
+   unable to express an ensemble.
+3. **pyscf ROHF corrupts fractional occ** — `make_rdm1` maps 1-d occ by
+   `occa = (occ > 0)` and the internal Fock build does the same: a
+   0.43 column becomes fully α-occupied. Hence the UHF carrier.
 
-   The pinned occ "column 9 ← 1/5" now lands on the *other* physical
-   orbital; occupations leak across shells and the density re-anisotropizes.
-3. **Trap 2 — MOM integerizes.** pyscf's maximum-overlap method
-   (`scf_addons.mom_occ_`) assigns whole electrons to the columns that
-   overlap most with the previous occupied set — the right *steering*
-   tool (it drives SCF into excited configurations; used for the UKS-MOM
-   start of §4.9) but unable to express an ensemble.
-4. **Trap 3 — pyscf ROHF corrupts fractional occ.** `make_rdm1` maps the
-   1-d occ by `occa = (occ > 0)`: a 0.43-occupied column becomes FULLY
-   α-occupied and the electron count corrupts. Replacement:
-
-```python
-# test_u14e_ensscf.py — the true fractional density
-def frac_rdm1(mo_coeff=None, mo_occ=None, **k):
-    moc = mo0 if mo_coeff is None else np.asarray(mo_coeff)
-    o = occ if mo_occ is None else np.asarray(mo_occ)
-    return (moc * o) @ moc.T            # occ split explicitly, no threshold
-mf.make_rdm1 = frac_rdm1
-```
-
-5. The occupation *lock* that survives the cycles: per cycle, match each
-   reference shell to its best-overlap current columns (shell-based MOM)
-   and re-assign the fractional pattern to THEM.
-6. CASCI on the result; certificates; CASCI-on-ensemble-basis control.
-
-Outcome (`u14e_ensscf.meta.json`, rerun on the UHF carrier — exact
-fractional occupations and exact energy bookkeeping): E(ensemble-SCF) =
-−49.800062, cycle-capped (DIIS and newton both fail pyscf's convergence
-criterion under the exact bookkeeping); orbitals l-pure to ~1e-6 at the
-start but drifting (purity max 2.2 at the cap); **the span is open** (dev 1.53) because the energetically optimal columns
-are *radial-mixed within l* (rank ≥ 2 — statement 2 of §4.2). Radial mixing
-is detected indirectly by the span certificate; the DIRECT test — the
-rank of C[r,m] per column — is not implemented, and its clean definition
-needs the m-resolved basis (the profiles are readable in the real AO
-shell basis, §4.2 statement 2; the Lz-eigenbasis needs complex columns).
-CASCI inside it: E = −50.264272, ⟨L²⟩(root 0) = 5.48 — a mixing value.
-Purifying afterwards makes closure worse (dev 2.91). Verdict:
-self-consistency and radial purity fight each other; not a term-valid
-reference. The attempted m-separation rescue is described with §4.2,
-statement 2.
+Outcome (converged, exact (α,β) bookkeeping, cross-check 0.0000 mHa;
+checkpoint `restart/pinned_ensemble.chk`): E = **−49.749341**
+(+632.511 mHa = 17.2115 eV vs the raw ROHF) — SCF self-consistency
+buys back only 35 mHa of the one-shot cost. **The span opens AT the
+frozen ensemble occupations** (dev 1.71): the energetically optimal
+columns are radial-mixed within l (rank ≥ 2 — statement 2 of §4.2),
+and the drift persists with occupations frozen — occupation pinning
+alone cannot hold the symmetric manifold. CASCI on the pinned
+orbitals: E = −50.326066, ⟨L²⟩ = mixing (§6, the verification row).
+Purifying a drifted ensemble basis makes closure worse (the historical
+cycle-capped run: dev 2.91, `u14e_ensscf.meta.json` — that stored-basis
+attempt did not converge in 800+ cycles; the fresh-basis pinning above
+is the convergent protocol). Verdict: self-consistency and radial
+purity fight each other; not a term-valid reference. The direct
+rank-C[r,m] test and the m-resolved-basis discussion: §4.2, statement 2.
 
 ---
 
@@ -1001,7 +988,7 @@ is (i) real ensemble-formation physics and (ii) partly the one-shot
 protocol: the CONVERGED self-consistent pinned ensemble recovers 35
 mHa of it (−49.7143 → −49.7493, DIIS ≡ newton, exact-evaluator
 cross-check 0.0000 mHa, `u14e_pinned_scf`); the CAS-target ensemble
-reaches −49.8001 but cycle-capped (§4.3). Most of the cost is
+reaches −49.8001 but cycle-capped (`u14e_ensscf.meta.json`). Most of the cost is
 intrinsic, not protocol. [Scope: light atoms and small open shells do not show this
 cost at any comparable scale — the effect grows with the number of
 near-degenerate valence shells.]
@@ -1069,9 +1056,9 @@ annotations say WHAT the quantity is; the sections hold the details.
 
 | quantity | E / Ha | E / eV | ΔE vs raw ROHF | what it is |
 |---|---|---|---|---|
-| E(raw quintet ROHF) | −50.381852 | −1370.9600 | 0 | the unrestricted reference: fresh spin=4 ROHF, no chk; reproduces the driver's `rohf.chk` (§4.1, `u14e_energy_ncheck`) |
-| E(m-averaged density, one shot) | −49.714300 | −1352.7950 | +667.552 / +18.1650 eV | the raw density after the spherical m-average, evaluated ONCE — no SCF happens inside `spherical_reference` (§4.2, `u14e_energy_ncheck`) |
-| E(pinned ensemble SCF, raw config) | −49.749341 | −1353.7485 | +632.511 / +17.2115 eV | SCF self-consistent at the frozen m-averaged ensemble (UHF carrier → exact fractional occ); converged. Checkpoint `restart/pinned_ensemble.chk` (§4.3) |
+| E(raw quintet ROHF) | −50.381852 | −1370.9600 | 0 | §4.1, `u14e_energy_ncheck` |
+| E(m-averaged density, not SCF) | −49.714300 | −1352.7950 | +667.552 / +18.1650 eV | the raw density after the spherical m-average, evaluated ONCE — no SCF; `spherical_reference`, §4.2, `u14e_energy_ncheck` |
+| E(pinned ensemble SCF, valence config) | −49.749341 | −1353.7485 | +632.511 / +17.2115 eV | SCF self-consistent at the frozen m-averaged ensemble; converged. §4.3 |
 | E_CASCI(6,13) on the pinned orbitals | −50.326066 | −1369.4420 | +55.786 / +1.5179 eV | CASCI in the pinned SCF's orbitals: span-open (1.71), mixing — the drift at frozen occupations (§6.1, `u14e_pinned_ensemble`) |
 | E_CASCI(6,13), sph reference | **−50.164365** | −1365.0419 | +217.487 / +5.9181 eV | **THE reference**: CASCI with orbitals frozen from `spherical_reference` on the raw quintet ROHF; span closed by construction → the exact ⁵I ladder (§4.2, `u14e_roots60`) |
 | E_CASCI(6,13), raw basis | −50.387840 | −1371.1230 | -5.988 / -0.1629 eV | CASCI in the raw ROHF's own MOs: lower, but term-blind — the span is open (§4.1, `u14e_energy_ncheck`) |
@@ -1095,8 +1082,7 @@ chain) vs 450.1 mHa = 12.25 eV (symmetric chain) — expected: a forced
 non-stationary density carries correlation + relaxation headroom; a
 converged ROHF does not. The pinned-SCF orbitals illustrate the drift
 directly: the CASCI on them lands at −50.326066 / −1369.4420 eV —
-span-open, a mixing value, not a table row. (A cycle-capped
-CAS-target-ensemble variant, −49.800062, is documented in §4.3.)
+span-open, a mixing value, not a table row.
 
 ### 6.1 The ROHF / CASCI / CASSCF comparison (all spin=4, exact evaluators)
 
@@ -1104,26 +1090,8 @@ CAS-target-ensemble variant, −49.800062, is documented in §4.3.)
 |---|---|---|---|
 | ROHF | −50.381852 / −1370.9600 eV | one-shot (m-averaged density): −49.714300 / −1352.7950 eV; self-consistent pinned: −49.749341 / −1353.7485 eV | +667.6 mHa = 18.16 eV (one-shot); +632.5 mHa = 17.21 eV (pinned) |
 | CASCI(6,13) | −50.387840 / −1371.1230 eV (term-blind) | **−50.164365 / −1365.0419 eV** — the term-exact reference (⁵I ground); orbitals = spherical_reference ON the raw quintet ROHF | +223.5 mHa = 6.08 eV |
-| CASCI(6,13) on pinned-ensemble orbitals | — | −50.326066 / −1369.4420 eV — **span-open (1.71), a mixing value**: the pinned SCF's own orbitals drift at frozen occupations (verification below) | −55.8 mHa = 1.52 eV below the term reference |
+| CASCI(6,13) on pinned-ensemble orbitals | — | −50.326066 / −1369.4420 eV — **span-open (1.71), a mixing value**: the pinned SCF's own orbitals drift at frozen occupations (§4.3) | −55.8 mHa = 1.52 eV below the term reference |
 | CASSCF(6,13) | −50.4399 / −50.4548 (−1372.5405 / −1372.9452 eV); span-open stationary points (§4.4) | — no data yet: this is exactly the constrained (in-loop projected) optimization of §4.8b (expected in [−50.1644, −50.4548]) | — |
-
-ROHF→CASCI gaps: 6.0 mHa = 0.16 eV (raw chain) vs 450.1 mHa = 12.25 eV
-(symmetric chain, from the one-shot density) — the forced density buys
-back most of its penalty through the CI; the residual 223.5 mHa = 6.08
-eV between the two CIs is the open span's genuine variational advantage
-(the purity premium, 16.8 term gaps). Verification — the reference reproduces from TWO independent orbital
-sources: (i) the stored driver chain and (ii) the fresh end-to-end
-chain — CASCI(raw, fresh span-transfer) = −50.38784001, span capture
-13.000000, closure 3.3e-12, CASCI(symm, fresh) = −50.16436700 (all
-within 0.002 mHa of the stored values). **A third source — the
-CONVERGED pinned-ensemble SCF — does NOT reproduce it**: its span is
-open (1.71) already at frozen m-uniform occupations, CASCI in it
-−50.326066, ladder non-integer (0.48). Finding: **the anisotropic
-drift persists even with the occupations frozen to the exact
-m-averaged ensemble** — occupation pinning alone cannot hold the
-symmetric manifold; only span-level constraints (§4.8b) can. This
-upgrades §4.3's "radial mixing" from an observation to a controlled
-demonstration.
 
 ---
 
@@ -1161,7 +1129,8 @@ tests/            one script per experiment + battery_lib.py
   test_u14e_frozen7s.py        the frozen-7s² study
   test_frozen7s_invariants.py  frozen-7s invariant completion
   test_u14e_population.py      Lowdin populations (p-theft)
-  test_u14e_ensscf.py          §4.3 ensemble-SCF
+  test_u14e_ensscf.py          the historical ensemble-SCF attempt
+                               (superseded by test_u14e_pinned_scf.py)
   test_u14e_ensscf_msep.py     the m-separation attempt (FAIL, kept; §4.2 stmt 2)
   test_commutator.py           §3.3 the probe
   test_no_audit.py             §5.5 the audit

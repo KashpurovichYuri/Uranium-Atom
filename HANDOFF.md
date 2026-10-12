@@ -66,7 +66,9 @@ via `python tests/make_big_table.py`).
   Occupation pinning alone cannot hold the manifold — only span-level
   constraints (§4.8b). The reference reproduces from TWO orbital
   sources (stored driver chain, fresh ROHF chain) but NOT from the
-  pinned-SCF source.
+  pinned-SCF source. The pinned ensemble is the single reported
+  self-consistent variant; the historical CAS-target attempt
+  (`u14e_ensscf.meta.json`, cycle-capped) is superseded.
 - Energy legitimacy (FINAL, spin- + evaluator-verified): raw quintet
   ROHF (spin=4, fresh, no chk) = −50.381852 (the project's original
   number; reproduces rohf.chk exactly). One-shot m-averaged density
