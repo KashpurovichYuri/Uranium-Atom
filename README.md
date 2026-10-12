@@ -20,7 +20,7 @@ pointer is given at each table); nothing here is recomputed by hand.
 | F | the Fock operator, F = h + G[γ] (one-electron part + Coulomb–exchange functional of γ) |
 | E_pq | = a†_p a_q, the spin-summed one-body excitation operator (E = E^α + E^β); the lift of a one-electron operator to Fock space, so "sum over electrons" is built in and N never appears explicitly |
 | l, l_k | the one-electron angular momentum operator r̂ × ∇ and its Cartesian components k = x, y, z |
-| sector | the Fock-space block with FIXED (n_α, n_β) — exactly the space CASCI solves in; a CI vector is a matrix Ψ[a-string, b-string] whose dimension is C(n,n_α)·C(n,n_β). Here C(n,k) = n!/(k!(n−k)!) is the binomial coefficient — the number of ways to place k electrons in n spin-orbitals, i.e. the number of distinct occupation strings of that spin; the sector dimension = (#α-strings) × (#β-strings). Example, U CAS(6,13): C(13,5)·C(13,1) = 1287·13 = 16 731 |
+| sector | the Fock-space block with FIXED (n_α, n_β) — exactly the space CASCI solves in; a CI vector is a matrix Ψ[a-string, b-string] of dimension C(n,n_α)·C(n,n_β), where C(n,k) counts the occupation strings of one spin (k electrons in n orbitals). Example, U CAS(6,13): C(13,5)·C(13,1) = 1287·13 = 16 731 |
 | W | the matrix of L² (or Lz²) inside one sector — "the sector L² matrix" |
 | string | an occupation bitmask (bit p = orbital p occupied); `e1_matrix` builds the matrix of Σ l_k[p,q] E_pq acting on single strings |
 | l-purity | an MO column is l-pure when ⟨l²⟩ = l(l+1) exactly |
@@ -34,11 +34,10 @@ orbital (equal determinants: the sum over all occupied orbitals).
 `moments.e1_matrix` implements exactly this for Σ l_k[p,q] E_pq, sign
 conventions included.
 
-**PSD (positive semidefinite)** — a Hermitian matrix whose eigenvalues are
-all ≥ 0. The sector L² matrix is a literal square of a Hermitian matrix
-(the per-component E·E form), so PSD holds by construction; a negative
-eigenvalue anywhere is an immediate construction bug (this is exactly the
-historical diagnostic that exposed the early one-body-only route).
+**PSD (positive semidefinite)** — all eigenvalues ≥ 0. The sector L²
+matrix is a literal square of a Hermitian matrix (the per-component E·E
+form), so PSD holds by construction; a negative eigenvalue is an
+immediate construction bug.
 
 ### 0.2 The routes (names used everywhere below)
 
@@ -117,16 +116,13 @@ the operator route remains exact for CI states in either case.
 theorem about REAL columns, not physics information; the informative
 partner is ⟨Lz²⟩ (§4.2, statement 2).
 
-**Conventions and pinned warnings** (moved here from the methods
-chapter; do not violate in the moment pipeline): the dm2 pairing
-PAIRING='pqrs', SIGN=+1 follows from the standard Wick expansion of
-⟨a†_p a_q a†_r a_s⟩ and is *validated* (not defined) by the 1e-13
-agreement with the operator route on carbon — same logic as the
-e1_matrix signs, checked against brute-force fermionic algebra (0.0).
-pyscf's `contract_1e` packs its one-body integrals with `pack_tril` and
-*silently symmetrizes* — it cannot apply the non-symmetric
-complex-Hermitian l-matrices; `contract_2e` conventions were abandoned
-in favor of the exact one-string construction.
+**Conventions and pinned warnings**: the dm2 pairing PAIRING='pqrs',
+SIGN=+1 follows from the Wick expansion of ⟨a†_p a_q a†_r a_s⟩ and is
+*validated* (not defined) by the 1e-13 agreement with the operator
+route — same logic as the e1_matrix signs (brute-force check: 0.0).
+pyscf's `contract_1e` *silently symmetrizes* via `pack_tril` — it
+cannot apply the complex-Hermitian l-matrices; do not mix it (or
+`contract_2e`) into the moment pipeline.
 
 ---
 
@@ -160,13 +156,13 @@ numbers; §4.9).
   optimized orbitals the span is not l-closed and no term labels exist.
 
 **Energy deviations (the price of purity, all measured).** CASCI on the raw
-basis: −50.387840 — **223.5 mHa below** the spherical CASCI, i.e. 16.8
-term gaps (⁵I→⁵L = 13.3 mHa) of variational advantage for giving up term
-identity. The CASSCF minima descend further (−50.4548…−50.4594), i.e.
-0.26–0.29 Ha below the spherical reference: **the span-open solutions are the
-true variational minima; the symmetric manifold is a saddle**. Ensemble-SCF
-lands at −49.4897 — above the spherical CASCI, because it enforces the
-ensemble (fractional) density at SCF level while sacrificing radial purity.
+basis: −50.387840 — **223.5 mHa = 6.08 eV below** the spherical CASCI
+(16.8 term gaps) of variational advantage for giving up term identity.
+The CASSCF minima descend further (−50.4548…−50.4594, i.e. 0.26–0.29 Ha
+below the reference): **the span-open solutions are the true variational
+minima; the symmetric manifold is a saddle**. The forced ensemble
+densities sit far above at HF level (+667.6 mHa one-shot, §6) — the CI
+buys most of that back inside the spherical span (§6, reconciliation).
 
 **The route that works everywhere.** sph-ROHF/CASCI + certificates:
 verified on U-14e, carbon, Si, Sc, Ti (sto-3g and def2-tzvp), with exact
@@ -509,27 +505,17 @@ Steps:
 2. Run CASCI in its canonical MOs, frozen.
 
 What fails, and why: the single-determinental density is not spherical →
-the Fock operator F = h + G[γ] is anisotropic → its eigenvectors are
-l-smeared → the active span is not l-closed → [P·H·P, L²] ≠ 0 → the
-ladder is a continuum of mixing values. Measured: span dev 0.83–2.6 on
-every system (`u14e_rohf_raw_control`, `atom_table`, big-table rows).
-Code invariants (checks 1–2, 4–6, 9 of §3.1) still pass — the code is
-right, the space is not — while the dm and operator routes separate by
-exactly the leak (§0.5: +2.0 on Si raw, +12 on Ti raw): the operator
-route remains the exact ⟨L²⟩ of the CI root (e.g. 0.0 for the single Si
-raw root — an accidental mixture value), the dm route picks up the
-outside-column pathways the closed-span derivation excludes. A note on
-basins: plain Aufbau ROHF has many near-degenerate solutions and the run
-lands in one of them start-dependently (the multi-basin issue behind
-the Ti sto row of §2.2). **The U-14e raw reference, measured fresh
-(spin=4 explicit, no checkpoint)**: E = −50.381852 Ha = −1370.9600 eV —
-reproducing the driver's `rohf.chk` and the project's original −50.3818.
-(Historical note: an early session ran this without `mol.spin` and
-silently converged the singlet — the trap is documented in §7.) On U,
-the raw CASCI energy
-−50.387840 is *lower* than the spherical −50.164365 by 223.5 mHa: the
-open span is a richer variational space — term-blind, which is exactly
-the point of §6.
+F = h + G[γ] is anisotropic → its eigenvectors l-smeared → the span not
+l-closed → [P·H·P, L²] ≠ 0 → a continuum of mixing values. Measured:
+span dev 0.83–2.6 on every system (`u14e_rohf_raw_control`,
+`atom_table`). Code invariants still pass — the code is right, the
+space is not — while the two evaluation routes separate by exactly the
+leak (§0.5: +2.0 Si raw, +12 Ti raw). Aufbau ROHF is multi-basin (the
+Ti sto row of §2.2); the spin trap applies (§7). **The U-14e raw
+reference, fresh (spin=4, no chk)**: −50.381852 Ha = −1370.9600 eV —
+the driver's `rohf.chk` and the project's original number. The raw
+CASCI −50.387840 is *lower* than the spherical −50.164365 by 223.5 mHa:
+a richer, term-blind space (§6).
 
 ### 4.2 sph-ROHF/CASCI — the reference route
 
@@ -1085,8 +1071,7 @@ annotations say WHAT the quantity is; the sections hold the details.
 |---|---|---|---|---|
 | E(raw quintet ROHF) | −50.381852 | −1370.9600 | 0 | the unrestricted reference: fresh spin=4 ROHF, no chk; reproduces the driver's `rohf.chk` (§4.1, `u14e_energy_ncheck`) |
 | E(m-averaged density, one shot) | −49.714300 | −1352.7950 | +667.552 / +18.1650 eV | the raw density after the spherical m-average, evaluated ONCE — no SCF happens inside `spherical_reference` (§4.2, `u14e_energy_ncheck`) |
-| E(pinned ensemble SCF, raw config) | −49.749341 | −1353.7485 | +632.511 / +17.2115 eV | SCF made self-consistent AT that ensemble: occupations pinned to the shell-m-averaged pattern (shell-lock), orbitals re-optimized on a UHF carrier (exact fractional occ); DIIS-converged, cross-check 0.0000 mHa; checkpoint `restart/pinned_ensemble.chk` (`u14e_pinned_ensemble`, §4.3). **Its orbitals FAIL the reference test: the span opens AT frozen ensemble occupations** (see below) |
-| E(ensemble-SCF, CAS-target ensemble) | −49.800062 | −1355.1287 | +581.790 / +15.8313 eV | the same machinery at the CAS-target configuration (7s² 6d⁵/5, 5f⁷·3/7); cycle-capped, conv=False (§4.3, `u14e_ensscf`) |
+| E(pinned ensemble SCF, raw config) | −49.749341 | −1353.7485 | +632.511 / +17.2115 eV | SCF self-consistent at the frozen m-averaged ensemble (UHF carrier → exact fractional occ); converged. Checkpoint `restart/pinned_ensemble.chk`. **Its orbitals FAIL the verification: the span opens at frozen occupations** (§6.1) |
 | E_CASCI(6,13), sph reference | **−50.164365** | −1365.0419 | +217.487 / +5.9181 eV | **THE reference**: CASCI with orbitals frozen from `spherical_reference` on the raw quintet ROHF; span closed by construction → the exact ⁵I ladder (§4.2, `u14e_roots60`) |
 | E_CASCI(6,13), raw basis | −50.387840 | −1371.1230 | -5.988 / -0.1629 eV | CASCI in the raw ROHF's own MOs: lower, but term-blind — the span is open (§4.1, `u14e_energy_ncheck`) |
 | E_CASCI(6,16), sph | −50.168752 | −1365.1613 | +213.100 / +5.7987 eV | +virtual 7p³: the duplicate ⁵G/⁵I terms appear (§2.3, `u14e_cas16`) |
@@ -1107,7 +1092,10 @@ residual is the open span's genuine variational advantage (the purity
 premium, §5.3b). **The ROHF→CASCI gaps**: 6.0 mHa = 0.16 eV (raw
 chain) vs 450.1 mHa = 12.25 eV (symmetric chain) — expected: a forced
 non-stationary density carries correlation + relaxation headroom; a
-converged ROHF does not.
+converged ROHF does not. The pinned-SCF orbitals illustrate the drift
+directly: the CASCI on them lands at −50.326066 / −1369.4420 eV —
+span-open, a mixing value, not a table row. (A cycle-capped
+CAS-target-ensemble variant, −49.800062, is documented in §4.3.)
 
 ### 6.1 The ROHF / CASCI / CASSCF comparison (all spin=4, exact evaluators)
 
@@ -1201,8 +1189,11 @@ project grows. `battery_lib.py` is the emerging shared test surface;
 **Checkpoint layout**: all restart checkpoints live in `restart/`
 (`rohf.chk` = the driver's raw quintet ROHF; `casscf.chk` = the U-14e
 CASSCF; `pinned_ensemble.chk` = the canonical pinned ensemble; the
-`32e_*` prefixed files belong to the U-32e project). **Data hygiene**:
-the historical 22-electron `mo_occ` inside `u14e_rohf_sph.npz` /
+`32e_*` prefixed files belong to the U-32e project). **Root layout**:
+the repo root holds the library (`lmom/`), the report, and the 14e
+generator (`make_data_u14e.py` + `uranium_pipeline.py`); the U-32e
+project (driver + generator) lives in `32e/`. **Data hygiene**: the
+historical 22-electron `mo_occ` inside `u14e_rohf_sph.npz` /
 `u14e_roots60.npz` was a core/active role MASK, not a density —
 replaced by the physical m-averaged ensemble occ (sums 14; an
 `occ_note` entry is embedded).

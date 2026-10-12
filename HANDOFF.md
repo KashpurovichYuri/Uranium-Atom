@@ -51,7 +51,9 @@ via `python tests/make_big_table.py`).
   columns), every CASSCF start (8/8 in wave 2). The span-open minima
   are the true variational minima; the symmetric manifold is a saddle
   (depth 0.26–0.29 Ha).
-- Checkpoints: ALL in `restart/` now (`rohf.chk` = the driver's raw
+- Layout: root = `lmom/` + the report + `make_data_u14e.py` +
+  `uranium_pipeline.py`; the U-32e driver + generator live in `32e/`.
+  Checkpoints: ALL in `restart/` (`rohf.chk` = the driver's raw
   quintet ROHF, `casscf.chk` = the U-14e CASSCF, `pinned_ensemble.chk`
   = the canonical pinned ensemble SCF, `32e_*` = the U-32e project).
   The historical 22-electron `mo_occ` in `u14e_rohf_sph.npz` /

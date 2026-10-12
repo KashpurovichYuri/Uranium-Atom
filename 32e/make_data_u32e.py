@@ -14,7 +14,7 @@ import os, sys, json
 import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-sys.path.insert(0, os.path.join(HERE, '32e'))
+sys.path.insert(0, os.path.join(HERE, '..'))          # the repo root
 
 from pyscf import scf, mcscf, lib
 import libgrpp4pyscf
@@ -25,7 +25,7 @@ from lmom.expectation import L2Lz_expectation_dm, span_certificate, core_certifi
 ACT = [13, 14, 15, 16, 17, 22, 23, 27, 28, 35, 36, 37, 38]   # 0-based
 NELECAS = (5, 1)
 NROOTS = 10
-OUT = os.path.join(HERE, 'lmom', 'data')
+OUT = os.path.join(HERE, '..', 'lmom', 'data')
 
 import test_uranium_atom_32e as cfg32
 
@@ -118,12 +118,12 @@ def analyze_and_store(name, mo, occ, w, cis, act=None, core=None):
 
 def main():
     # (a) the ROHF MOs (the reference convention)
-    mf = load_mf(os.path.join(HERE, '32e', 'rohf.chk'))
+    mf = load_mf(os.path.join(HERE, '..', 'restart', '32e_rohf.chk'))  # historical: absent
     w, cis = casci_roots(mf, 'rohf')
     analyze_and_store('u32e_rohf', mf.mo_coeff, mf.mo_occ, w, cis)
 
     # (b) the CASSCF MOs (the tracked active columns)
-    mcc = lib.chkfile.load(os.path.join(HERE, '32e', 'casscf.chk'), 'mcscf')
+    mcc = lib.chkfile.load(os.path.join(HERE, 'casscf.chk'), 'mcscf')
     mo_c = mcc['mo_coeff']
     L = get_L(mol, mf.mo_coeff)
     ov = mf.mo_coeff[:, ACT].conj().T @ mol.intor('int1e_ovlp') @ mo_c
