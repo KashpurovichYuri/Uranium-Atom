@@ -1085,7 +1085,7 @@ annotations say WHAT the quantity is; the sections hold the details.
 |---|---|---|---|---|
 | E(raw quintet ROHF) | −50.381852 | −1370.9600 | 0 | the unrestricted reference: fresh spin=4 ROHF, no chk; reproduces the driver's `rohf.chk` (§4.1, `u14e_energy_ncheck`) |
 | E(m-averaged density, one shot) | −49.714300 | −1352.7950 | +667.552 / +18.1650 eV | the raw density after the spherical m-average, evaluated ONCE — no SCF happens inside `spherical_reference` (§4.2, `u14e_energy_ncheck`) |
-| E(pinned ensemble SCF, raw config) | −49.749341 | −1353.7485 | +632.511 / +17.2115 eV | SCF made self-consistent AT that ensemble: occupations pinned to the shell-m-averaged pattern (shell-lock), orbitals re-optimized on a UHF carrier (exact fractional occ); DIIS ≡ newton, exact-evaluator cross-check 0.0000 mHa (`u14e_pinned_scf`, §4.3) |
+| E(pinned ensemble SCF, raw config) | −49.749341 | −1353.7485 | +632.511 / +17.2115 eV | SCF made self-consistent AT that ensemble: occupations pinned to the shell-m-averaged pattern (shell-lock), orbitals re-optimized on a UHF carrier (exact fractional occ); DIIS-converged, cross-check 0.0000 mHa; checkpoint `restart/pinned_ensemble.chk` (`u14e_pinned_ensemble`, §4.3). **Its orbitals FAIL the reference test: the span opens AT frozen ensemble occupations** (see below) |
 | E(ensemble-SCF, CAS-target ensemble) | −49.800062 | −1355.1287 | +581.790 / +15.8313 eV | the same machinery at the CAS-target configuration (7s² 6d⁵/5, 5f⁷·3/7); cycle-capped, conv=False (§4.3, `u14e_ensscf`) |
 | E_CASCI(6,13), sph reference | **−50.164365** | −1365.0419 | +217.487 / +5.9181 eV | **THE reference**: CASCI with orbitals frozen from `spherical_reference` on the raw quintet ROHF; span closed by construction → the exact ⁵I ladder (§4.2, `u14e_roots60`) |
 | E_CASCI(6,13), raw basis | −50.387840 | −1371.1230 | -5.988 / -0.1629 eV | CASCI in the raw ROHF's own MOs: lower, but term-blind — the span is open (§4.1, `u14e_energy_ncheck`) |
@@ -1121,11 +1121,19 @@ ROHF→CASCI gaps: 6.0 mHa = 0.16 eV (raw chain) vs 450.1 mHa = 12.25 eV
 (symmetric chain, from the one-shot density) — the forced density buys
 back most of its penalty through the CI; the residual 223.5 mHa = 6.08
 eV between the two CIs is the open span's genuine variational advantage
-(the purity premium, 16.8 term gaps). Verification: the whole reference
-chain reproduces END-TO-END from a fresh ROHF — CASCI(raw, fresh
-span-transfer) = −50.38784001, span capture 13.000000, closure 3.3e-12,
-CASCI(symm, fresh) = −50.16436700 (all within 0.002 mHa of the stored
-values).
+(the purity premium, 16.8 term gaps). Verification — the reference reproduces from TWO independent orbital
+sources: (i) the stored driver chain and (ii) the fresh end-to-end
+chain — CASCI(raw, fresh span-transfer) = −50.38784001, span capture
+13.000000, closure 3.3e-12, CASCI(symm, fresh) = −50.16436700 (all
+within 0.002 mHa of the stored values). **A third source — the
+CONVERGED pinned-ensemble SCF — does NOT reproduce it**: its span is
+open (1.71) already at frozen m-uniform occupations, CASCI in it
+−50.326066, ladder non-integer (0.48). Finding: **the anisotropic
+drift persists even with the occupations frozen to the exact
+m-averaged ensemble** — occupation pinning alone cannot hold the
+symmetric manifold; only span-level constraints (§4.8b) can. This
+upgrades §4.3's "radial mixing" from an observation to a controlled
+demonstration.
 
 ---
 
@@ -1189,6 +1197,15 @@ project grows. `battery_lib.py` is the emerging shared test surface;
 `u14e_rohf.meta.json` and `u14e_rohf_raw.meta.json` are corrupt
 (truncated old-session saves; superseded by `u14e_rohf_sph` and
 `u14e_rohf_raw_control`) — data hygiene, noted, not blocking.
+
+**Checkpoint layout**: all restart checkpoints live in `restart/`
+(`rohf.chk` = the driver's raw quintet ROHF; `casscf.chk` = the U-14e
+CASSCF; `pinned_ensemble.chk` = the canonical pinned ensemble; the
+`32e_*` prefixed files belong to the U-32e project). **Data hygiene**:
+the historical 22-electron `mo_occ` inside `u14e_rohf_sph.npz` /
+`u14e_roots60.npz` was a core/active role MASK, not a density —
+replaced by the physical m-averaged ensemble occ (sums 14; an
+`occ_note` entry is embedded).
 
 **pyscf traps encountered** (all pinned in code comments): **`gto.M`
 without `spin=` silently converges the singlet Aufbau for an open-shell

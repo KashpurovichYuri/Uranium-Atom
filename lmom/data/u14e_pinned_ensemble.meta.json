@@ -1,0 +1,18 @@
+{
+ "e_raw": -50.38185233327938,
+ "occ_pin_sum": 14.0,
+ "ill_conditioning_note": "fixed-index occ (no lock) variant: 800+ cycles, no pyscf convergence - the shell-locked variant is the convergent one",
+ "e_pinned": -49.74934148842741,
+ "e_diis": -49.74934148842741,
+ "scheme": "DIIS",
+ "converged": true,
+ "e_check": -49.74934148842739,
+ "dE_mHa": 632.5108448519713,
+ "dE_eV": 17.211496904043184,
+ "verify": {
+  "e_casci": -50.32606571440244,
+  "span_invar": 1.7149611051049993,
+  "ladder_dev": 0.47543241770497424,
+  "passed": false
+ }
+}

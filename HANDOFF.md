@@ -51,6 +51,20 @@ via `python tests/make_big_table.py`).
   columns), every CASSCF start (8/8 in wave 2). The span-open minima
   are the true variational minima; the symmetric manifold is a saddle
   (depth 0.26–0.29 Ha).
+- Checkpoints: ALL in `restart/` now (`rohf.chk` = the driver's raw
+  quintet ROHF, `casscf.chk` = the U-14e CASSCF, `pinned_ensemble.chk`
+  = the canonical pinned ensemble SCF, `32e_*` = the U-32e project).
+  The historical 22-electron `mo_occ` in `u14e_rohf_sph.npz` /
+  `u14e_roots60.npz` was a role MASK, not a density — replaced by the
+  physical m-averaged ensemble occ (sums 14).
+- NEW FINDING (the pinned-ensemble test): the CONVERGED pinned
+  ensemble SCF (−49.749341, exact bookkeeping) has an OPEN span
+  (1.71) — the anisotropic drift persists at FROZEN m-uniform
+  occupations; CASCI on its orbitals −50.326066, ladder non-integer.
+  Occupation pinning alone cannot hold the manifold — only span-level
+  constraints (§4.8b). The reference reproduces from TWO orbital
+  sources (stored driver chain, fresh ROHF chain) but NOT from the
+  pinned-SCF source.
 - Energy legitimacy (FINAL, spin- + evaluator-verified): raw quintet
   ROHF (spin=4, fresh, no chk) = −50.381852 (the project's original
   number; reproduces rohf.chk exactly). One-shot m-averaged density
@@ -110,7 +124,10 @@ Run it FIRST on any new reference.
   typical.
 - pyscf traps (all pinned in code comments): **`gto.M` without `spin=`
   silently converges the SINGLET Aufbau (−50.151644) instead of the
-  quintet (−50.381852) — always pass spin explicitly**; ROHF 1-d
+  quintet (−50.381852) — always pass spin explicitly**; **the pinned
+  ensemble SCF on the STORED l-grouped basis does not converge
+  (800+ cycles) — the fresh-basis pinning is the convergent
+  protocol**; ROHF 1-d
   fractional occ → `occa = (occ>0)`; `contract_1e` pack_tril symmetrization (cannot apply
   non-symmetric one-body operators); MOM integerizes occupations;
   Davidson mixes degenerate blocks; MO columns reorder at every

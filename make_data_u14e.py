@@ -188,7 +188,7 @@ def spherical_pick(mf, occ_ref, raw_mo):
 def main():
     # (0) frozen CASCI on the RAW ROHF MOs with the pipeline pick —
     # the NEGATIVE CONTROL: the certificates must flag
-    mf = load_mf(os.path.join(HERE, '14e', 'rohf.chk'))
+    mf = load_mf(os.path.join(HERE, 'restart', 'rohf.chk'))
     w, cis = casci_roots(mf, mf.mo_coeff, 'rohf-raw')
     analyze_and_store('u14e_rohf_raw', mf.mo_coeff, mf.mo_occ, w, cis)
 
@@ -217,7 +217,7 @@ def main():
 
     # (b) CASCI on the CASSCF MOs (the post-optimization picture; the
     # active columns tracked by overlap with the seed-row pick)
-    mcc = lib.chkfile.load(os.path.join(HERE, '14e', 'casscf.chk'), 'mcscf')
+    mcc = lib.chkfile.load(os.path.join(HERE, 'restart', 'casscf.chk'), 'mcscf')
     mo_c = mcc['mo_coeff']
     L = get_L(mol, mf.mo_coeff)
     ov = mf.mo_coeff[:, ACT].conj().T @ mol.intor('int1e_ovlp') @ mo_c

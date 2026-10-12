@@ -82,7 +82,8 @@ def load_start(mol, sid):
           'D': 'uks_pbe_fixocc_char.chk',
           'E': 'uks_pbe_fixocc_idx.chk',
           'F': 'uks_pbe_fixocc_mom.chk'}[sid]
-    mol_chk, rec = scf.chkfile.load_scf(os.path.join(ROOT, '14e', fn))
+    mol_chk, rec = scf.chkfile.load_scf(os.path.join(ROOT,
+        'restart', fn))
     mo, occ = rec['mo_coeff'], rec['mo_occ']
     if np.asarray(mo).ndim == 3:          # UKS: -> natural orbitals
         mo, occ = uks_to_nos(mol, mo, occ)
