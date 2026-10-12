@@ -1071,7 +1071,8 @@ annotations say WHAT the quantity is; the sections hold the details.
 |---|---|---|---|---|
 | E(raw quintet ROHF) | −50.381852 | −1370.9600 | 0 | the unrestricted reference: fresh spin=4 ROHF, no chk; reproduces the driver's `rohf.chk` (§4.1, `u14e_energy_ncheck`) |
 | E(m-averaged density, one shot) | −49.714300 | −1352.7950 | +667.552 / +18.1650 eV | the raw density after the spherical m-average, evaluated ONCE — no SCF happens inside `spherical_reference` (§4.2, `u14e_energy_ncheck`) |
-| E(pinned ensemble SCF, raw config) | −49.749341 | −1353.7485 | +632.511 / +17.2115 eV | SCF self-consistent at the frozen m-averaged ensemble (UHF carrier → exact fractional occ); converged. Checkpoint `restart/pinned_ensemble.chk`. **Its orbitals FAIL the verification: the span opens at frozen occupations** (§6.1) |
+| E(pinned ensemble SCF, raw config) | −49.749341 | −1353.7485 | +632.511 / +17.2115 eV | SCF self-consistent at the frozen m-averaged ensemble (UHF carrier → exact fractional occ); converged. Checkpoint `restart/pinned_ensemble.chk` (§4.3) |
+| E_CASCI(6,13) on the pinned orbitals | −50.326066 | −1369.4420 | +55.786 / +1.5179 eV | CASCI in the pinned SCF's orbitals: span-open (1.71), mixing — the drift at frozen occupations (§6.1, `u14e_pinned_ensemble`) |
 | E_CASCI(6,13), sph reference | **−50.164365** | −1365.0419 | +217.487 / +5.9181 eV | **THE reference**: CASCI with orbitals frozen from `spherical_reference` on the raw quintet ROHF; span closed by construction → the exact ⁵I ladder (§4.2, `u14e_roots60`) |
 | E_CASCI(6,13), raw basis | −50.387840 | −1371.1230 | -5.988 / -0.1629 eV | CASCI in the raw ROHF's own MOs: lower, but term-blind — the span is open (§4.1, `u14e_energy_ncheck`) |
 | E_CASCI(6,16), sph | −50.168752 | −1365.1613 | +213.100 / +5.7987 eV | +virtual 7p³: the duplicate ⁵G/⁵I terms appear (§2.3, `u14e_cas16`) |
@@ -1101,8 +1102,9 @@ CAS-target-ensemble variant, −49.800062, is documented in §4.3.)
 
 | method | no restriction | symmetry imposed | Δ (symm − unrestrict.) |
 |---|---|---|---|
-| ROHF | −50.381852 / −1370.9600 eV | one-shot (m-averaged density): −49.714300 / −1352.7950 eV; self-consistent pinned (CONVERGED, DIIS ≡ newton): −49.749341 / −1353.7485 eV | +667.6 mHa = 18.16 eV (one-shot); +632.5 mHa = 17.21 eV (pinned SCF) |
+| ROHF | −50.381852 / −1370.9600 eV | one-shot (m-averaged density): −49.714300 / −1352.7950 eV; self-consistent pinned: −49.749341 / −1353.7485 eV | +667.6 mHa = 18.16 eV (one-shot); +632.5 mHa = 17.21 eV (pinned) |
 | CASCI(6,13) | −50.387840 / −1371.1230 eV (term-blind) | **−50.164365 / −1365.0419 eV** — the term-exact reference (⁵I ground); orbitals = spherical_reference ON the raw quintet ROHF | +223.5 mHa = 6.08 eV |
+| CASCI(6,13) on pinned-ensemble orbitals | — | −50.326066 / −1369.4420 eV — **span-open (1.71), a mixing value**: the pinned SCF's own orbitals drift at frozen occupations (verification below) | −55.8 mHa = 1.52 eV below the term reference |
 | CASSCF(6,13) | −50.4399 / −50.4548 (−1372.5405 / −1372.9452 eV); span-open stationary points (§4.4) | — no data yet: this is exactly the constrained (in-loop projected) optimization of §4.8b (expected in [−50.1644, −50.4548]) | — |
 
 ROHF→CASCI gaps: 6.0 mHa = 0.16 eV (raw chain) vs 450.1 mHa = 12.25 eV
